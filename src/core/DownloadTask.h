@@ -24,6 +24,8 @@ public:
     void requeue();
     void cancel();
     void setDestPath(const QString& path);
+    void clearProvisionalName();               // user confirmed the name; stop CD override
+    bool provisionalName() const { return m_provisionalName; }
     void setCredentials(const Credentials& c);
     DownloadState    state() const { return m_state; }
     QString          error() const { return m_error; }

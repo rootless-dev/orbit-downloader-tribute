@@ -303,6 +303,10 @@ void DownloadTask::setDestPath(const QString& path) {
     m_destPath = path;
 }
 
+void DownloadTask::clearProvisionalName() {
+    m_provisionalName = false;
+}
+
 void DownloadTask::pause() {
     for (auto* w : m_workers) w->stop();
     if (m_metaTimer) m_metaTimer->stop();
