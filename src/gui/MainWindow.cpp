@@ -652,6 +652,7 @@ void MainWindow::onPreferences() {
     PreferencesDialog dlg(m_settings, this);
     if (dlg.exec() != QDialog::Accepted) return;
     m_settings = dlg.result();
+    applyTheme(m_settings.ui.theme);              // aplica o tema ao vivo (onPreferences não passa por applySettings)
     m_mgr->setConfig(m_settings.engine);
     applyBrowserBridge(m_settings.browser);
     m_clip->setMode(m_settings.ui.clipboardMode);
