@@ -5,7 +5,7 @@
       "release-type": "simple",
       "package-name": "orbit-downloader-tribute",
       "changelog-path": "CHANGELOG.md",
-      "release-as": "0.1.0",
+      "include-component-in-tag": false,
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": false
     }
