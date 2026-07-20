@@ -27,6 +27,7 @@
 #include "PreferencesDialog.h"
 #include "SchedulerDialog.h"
 #include "ContextMenuRules.h"
+#include "Theme.h"
 #include "TestServer.h"
 #include <QAction>
 #include <QLabel>
@@ -1164,6 +1165,17 @@ private slots:
         // Open: só Completed.
         QVERIFY(ctxCanOpen(S::Completed));
         QVERIFY(!ctxCanOpen(S::Paused));
+    }
+
+    // --- Task 3: Theme module ---------------------------------------------------
+
+    void gridColors_keeps_orbit_identity_colors() {
+        const GridColors c = gridColors();
+        QCOMPARE(c.downloaded, QColor("#5b9bd5"));
+        QCOMPARE(c.active,     QColor("#f7941e"));
+        QCOMPARE(c.error,      QColor("#ef4444"));
+        QVERIFY(c.background.isValid());
+        QVERIFY(c.pending.isValid());
     }
 };
 

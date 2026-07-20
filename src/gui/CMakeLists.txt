@@ -18,6 +18,7 @@ add_library(orbitgui STATIC
     DownloadTableModel.cpp
     CategoryFilterProxy.cpp
     ProgressGridWidget.cpp
+    Theme.cpp
     NewDownloadDialog.cpp
     CategoryTree.cpp
     ClipboardWatcher.cpp
