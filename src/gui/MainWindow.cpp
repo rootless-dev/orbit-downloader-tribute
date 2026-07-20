@@ -291,7 +291,7 @@ void MainWindow::dropEvent(QDropEvent* e) {
 
     // Uma URL: o New pré-preenchido, p/ escolher pasta. Várias: perguntar N
     // vezes seria insuportável — vão todas p/ a pasta padrão (spec §3.7).
-    if (urls.size() == 1) { addUrlViaDialog(urls.first()); return; }
+    if (urls.size() == 1) { receiveLink(urls.first(), {}); return; }
     for (const QUrl& u : urls) enqueue(u, defaultDir());
 }
 
@@ -479,7 +479,7 @@ void MainWindow::onClipboardUrl(const QUrl& url) {
         case ClipboardMode::Off:
             return;
         case ClipboardMode::Ask:
-            addUrlViaDialog(url);
+            receiveLink(url, {});
             return;
         case ClipboardMode::Auto:
             enqueue(url, defaultDir());
@@ -511,7 +511,7 @@ void MainWindow::showLinkNotification(const QUrl& url) {
 
     connect(m_notice, &QLabel::linkActivated, this, [this, url] {
         clearLinkNotification();
-        addUrlViaDialog(url);
+        receiveLink(url, {});
     });
     QTimer::singleShot(8000, this, &MainWindow::clearLinkNotification);
 }
@@ -552,28 +552,70 @@ void MainWindow::applySettings(const AppSettings& s, const QString& settingsPath
     applyBrowserBridge(s.browser);
 }
 
-// Recebe um download solicitado pela extensão do browser (Task 6/8, Fase 5):
-// deriva o nome do arquivo (sugerido pela extensão ou pela própria URL),
-// enfileira com os headers encaminhados (cookies/referer/UA) e notifica via
-// bandeja. addDownload() devolve QUuid nulo p/ esquema não suportado — nesse
-// caso não há task pra anexar ao model.
-void MainWindow::onBrowserDownload(const QUrl& url, const HeaderList& headers,
-                                   const QString& filename) {
-    // Endurecimento (revisão final, Fase 5): o filename vem do browser (não
-    // confiável) — reduz a um basename antes de juntar ao diretório de
-    // destino, senão um path absoluto ou "../" poderia escapar do dir.
-    const QString base = filename.isEmpty() ? QString() : QFileInfo(filename).fileName();
-    const QString name = base.isEmpty() ? deriveFileName(url) : base;
-    const QString dest = QDir(defaultDir()).filePath(name);
-    // provisionalName=true: o nome veio do browser/URL (palpite) — o motor
-    // adota o Content-Disposition do servidor se houver (corrige, p.ex., URLs
-    // do Google Drive cujo path é "/download").
-    const QUuid id = m_mgr->addDownload(url, dest, headers, /*provisionalName=*/true);
-    if (id.isNull()) return;                     // esquema não suportado
+// Create the background download for a received link and show it in the list,
+// so it starts fetching immediately while the user configures the New dialog.
+QUuid MainWindow::beginBackgroundLink(const QUrl& url, const HeaderList& headers) {
+    const QString provDest = QDir(defaultDir()).filePath(deriveFileName(url));
+    const QUuid id = m_mgr->addDownload(url, provDest, headers, /*provisionalName=*/true);
+    if (id.isNull()) return {};                          // unsupported scheme
     m_model->appendTask(m_mgr->taskById(id));
-    if (m_tray)
-        m_tray->showMessage(tr("Orbit"), tr("New download from browser: %1").arg(name),
-                            QSystemTrayIcon::Information, 5000);
+    return id;
+}
+
+// A link arrived with a URL (extension / clipboard-Ask / single drag): start it
+// in the background and bring up the New dialog to confirm name/folder. On OK the
+// running download is retargeted live (bytes preserved); on Cancel it's discarded.
+void MainWindow::receiveLink(const QUrl& url, const HeaderList& headers) {
+    const QUuid id = beginBackgroundLink(url, headers);
+    if (id.isNull()) return;
+    if (m_dialogOpen) {                                  // don't stack dialogs
+        if (m_tray)
+            m_tray->showMessage(tr("Orbit"),
+                tr("New download from link: %1").arg(deriveFileName(url)),
+                QSystemTrayIcon::Information, 5000);
+        return;
+    }
+    raise();
+    activateWindow();
+    NewDownloadDialog d(this, url);
+    m_dialogOpen = true;
+    const bool accepted = (d.exec() == QDialog::Accepted);
+    m_dialogOpen = false;
+    reconcileReceivedLink(id, url, headers, accepted, d.url(), d.destPath());
+}
+
+// Apply the user's decision to the already-running background download.
+void MainWindow::reconcileReceivedLink(const QUuid& id, const QUrl& origUrl,
+                                       const HeaderList& headers, bool accepted,
+                                       const QUrl& chosenUrl, const QString& chosenDest) {
+    if (!accepted) {                                     // Cancel: discard fully + delete partial
+        m_mgr->remove(id, /*deleteFiles=*/true);
+        m_model->removeTaskById(id);
+        return;
+    }
+    if (chosenUrl != origUrl) {                          // URL changed: can't reuse bytes -> restart
+        m_mgr->remove(id, /*deleteFiles=*/true);
+        m_model->removeTaskById(id);
+        const QUuid nid = m_mgr->addDownload(chosenUrl, chosenDest, headers, /*provisionalName=*/false);
+        if (!nid.isNull()) m_model->appendTask(m_mgr->taskById(nid));
+        return;
+    }
+    DownloadTask* t = m_mgr->taskById(id);
+    if (!t) return;
+    m_lastDir = QFileInfo(chosenDest).absolutePath();    // remember chosen folder this session
+    if (chosenDest != t->record().destPath)
+        m_mgr->retarget(id, chosenDest);
+    t->clearProvisionalName();                           // user confirmed the name
+}
+
+// Recebe um download solicitado pela extensão do browser (Task 6/8, Fase 5):
+// abre o fluxo de link recebido (background + New dialog para confirmar
+// nome/pasta). O filename sugerido pela extensão não é mais usado como
+// basename do destino — deriveFileName(url) decide dentro de
+// beginBackgroundLink, e o próprio New dialog pode sobrescrever.
+void MainWindow::onBrowserDownload(const QUrl& url, const HeaderList& headers,
+                                   const QString& /*filename*/) {
+    receiveLink(url, headers);
 }
 
 // (Re)aplica a configuração do bridge do browser (Task 8, Fase 5): cria o

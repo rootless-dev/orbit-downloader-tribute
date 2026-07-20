@@ -1106,6 +1106,59 @@ private slots:
             {QByteArray("Cookie"), QByteArray("k=v")}));
     }
 
+    // --- Task 4 (Fase 5): receiveLink flow + background download + reconcile
+
+    void reconcileAcceptChangedDestRetargets() {
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        DownloadTableModel model(&mgr);
+        MainWindow w(&mgr, &model, nullptr);
+        const QUrl url("https://h/file.bin");
+        const QUuid id = w.beginBackgroundLinkForTest(url, {});
+        const QString newDest = QDir(dir.path()).filePath("chosen.bin");
+        w.reconcileReceivedLinkForTest(id, url, {}, /*accepted=*/true, url, newDest);
+        QCOMPARE(mgr.taskById(id)->record().destPath, newDest);
+        QVERIFY(!mgr.taskById(id)->provisionalName());          // cleared on confirm
+    }
+    void reconcileCancelDiscardsTask() {
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        DownloadTableModel model(&mgr);
+        MainWindow w(&mgr, &model, nullptr);
+        const QUrl url("https://h/file.bin");
+        const int before = model.rowCount();
+        const QUuid id = w.beginBackgroundLinkForTest(url, {});
+        QCOMPARE(model.rowCount(), before + 1);
+        w.reconcileReceivedLinkForTest(id, url, {}, /*accepted=*/false, url, QString());
+        QVERIFY(mgr.taskById(id) == nullptr);                  // fully removed
+        QCOMPARE(model.rowCount(), before);
+    }
+    void reconcileChangedUrlRestarts() {
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        DownloadTableModel model(&mgr);
+        MainWindow w(&mgr, &model, nullptr);
+        const QUrl urlA("https://h/a.bin");
+        const QUrl urlB("https://h/b.bin");
+        const QUuid id = w.beginBackgroundLinkForTest(urlA, {});
+        const QString destB = QDir(dir.path()).filePath("b.bin");
+        w.reconcileReceivedLinkForTest(id, urlA, {}, /*accepted=*/true, urlB, destB);
+        QVERIFY(mgr.taskById(id) == nullptr);                  // original discarded
+        const auto tasks = mgr.tasks();
+        QVERIFY(!tasks.isEmpty());
+        QCOMPARE(tasks.last()->record().url, urlB);            // restarted for the new URL
+    }
+    void secondLinkWhileDialogOpenEnqueuesDirectly() {
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        DownloadTableModel model(&mgr);
+        MainWindow w(&mgr, &model, nullptr);
+        w.setDialogOpenForTest(true);                          // simulate a New dialog already up
+        const int before = model.rowCount();
+        w.emitBrowserDownloadForTest(QUrl("https://h/big.iso"), {}, "big.iso");
+        QCOMPARE(model.rowCount(), before + 1);               // background-enqueued, no modal
+    }
+
     // Fix (Task 8, Fase 5, spec §7): o bridge deve ser reaplicado ao mudar as
     // Preferences, não só na inicialização. Como dirigir o QDialog modal do
     // Preferences é inviável offscreen, testamos o helper compartilhado
