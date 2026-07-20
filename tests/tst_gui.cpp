@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QFormLayout>
 
 // Ver tst_download.cpp / issue #1: testes que observam um download no estado
 // Downloading no meio da transferência são flaky em hardware rápido (CI). Rodam
@@ -712,6 +713,14 @@ private slots:
         dlg.applyProbeResult(QUrl("https://x.com/file.zip"), r);
 
         QCOMPARE(nameEdit->text(), QString("file.zip"));       // fallback mantido
+    }
+
+    void newDialogFieldsGrow() {
+        NewDownloadDialog d(nullptr, QUrl("https://h/x.bin"));
+        auto* form = d.findChild<QFormLayout*>();
+        QVERIFY(form != nullptr);
+        QCOMPARE(form->fieldGrowthPolicy(), QFormLayout::AllNonFixedFieldsGrow);
+        QVERIFY(d.minimumWidth() >= 480);
     }
 
     // --- Task 11: CategoryTree --------------------------------------------
