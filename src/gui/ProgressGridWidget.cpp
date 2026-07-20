@@ -1,6 +1,7 @@
 #include "ProgressGridWidget.h"
 #include "GridGeometry.h"
 #include "DownloadTask.h"
+#include "Theme.h"
 #include <QPainter>
 #include <QResizeEvent>
 #include <QStyle>
@@ -71,7 +72,8 @@ void ProgressGridWidget::resizeEvent(QResizeEvent*) {
 
 void ProgressGridWidget::paintEvent(QPaintEvent*) {
     QPainter p(this);
-    p.fillRect(rect(), QColor("#ffffff"));
+    const GridColors col = gridColors();
+    p.fillRect(rect(), col.background);
     if (!m_task) return;
     const int cols   = qMax(1, width() / kCellPx);
     const int nCells = qMax(cellCount(), cols);
@@ -82,10 +84,10 @@ void ProgressGridWidget::paintEvent(QPaintEvent*) {
         const int cy = (i / cols) * kCellPx;
         QColor c;
         switch (cells[i].kind) {
-            case CellKind::Downloaded: c = QColor("#5b9bd5"); break;   // azul Orbit
-            case CellKind::Active:     c = QColor("#f7941e"); break;   // laranja (cabeça)
-            case CellKind::Error:      c = QColor("#ef4444"); break;
-            case CellKind::Pending:    c = QColor("#dcdcdc"); break;   // cinza claro
+            case CellKind::Downloaded: c = col.downloaded; break;
+            case CellKind::Active:     c = col.active;     break;
+            case CellKind::Error:      c = col.error;      break;
+            case CellKind::Pending:    c = col.pending;    break;
         }
         p.fillRect(cx, cy, kCellPx - 1, kCellPx - 1, c);
     }

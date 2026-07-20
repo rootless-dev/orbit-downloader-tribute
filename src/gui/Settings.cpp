@@ -16,6 +16,18 @@ static ClipboardMode clipFromStr(const QString& s) {
     if (s == "Notify") return ClipboardMode::Notify;
     return ClipboardMode::Off;
 }
+static QString themeToStr(ThemePref t) {
+    switch (t) {
+        case ThemePref::Light: return "light";
+        case ThemePref::Dark:  return "dark";
+        case ThemePref::System: default: return "system";
+    }
+}
+static ThemePref themeFromStr(const QString& s) {
+    if (s == "light") return ThemePref::Light;
+    if (s == "dark")  return ThemePref::Dark;
+    return ThemePref::System;
+}
 static QTime timeOr(const QString& s, QTime def) {
     const QTime t = QTime::fromString(s, "HH:mm");
     return t.isValid() ? t : def;
@@ -30,6 +42,7 @@ AppSettings fromJson(const QJsonObject& root, const EngineConfig& defaults) {
     const QJsonObject ui = root.value("ui").toObject();
     s.ui.defaultDownloadDir = ui.value("defaultDownloadDir").toString();
     s.ui.clipboardMode      = clipFromStr(ui.value("clipboardMode").toString());
+    s.ui.theme              = themeFromStr(ui.value("theme").toString());
 
     const QJsonObject sc = root.value("scheduler").toObject();
     s.scheduler.enabled      = sc.value("enabled").toBool(false);
@@ -52,7 +65,8 @@ QJsonObject toJson(const AppSettings& s, const QJsonObject& prev) {
     root["engine"]   = engineConfigToJson(s.engine);
     root["ui"]       = QJsonObject{
         {"defaultDownloadDir", s.ui.defaultDownloadDir},
-        {"clipboardMode",      clipToStr(s.ui.clipboardMode)}};
+        {"clipboardMode",      clipToStr(s.ui.clipboardMode)},
+        {"theme",              themeToStr(s.ui.theme)}};
     root["scheduler"] = QJsonObject{
         {"enabled",      s.scheduler.enabled},
         {"startTime",    s.scheduler.start.toString("HH:mm")},

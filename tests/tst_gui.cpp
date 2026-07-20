@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <QFormLayout>
 
 // Ver tst_download.cpp / issue #1: testes que observam um download no estado
 // Downloading no meio da transferência são flaky em hardware rápido (CI). Rodam
@@ -27,6 +28,7 @@
 #include "PreferencesDialog.h"
 #include "SchedulerDialog.h"
 #include "ContextMenuRules.h"
+#include "Theme.h"
 #include "TestServer.h"
 #include <QAction>
 #include <QLabel>
@@ -141,6 +143,25 @@ private slots:
         auto cells = computeCells(1000, s, DownloadState::Error, 10);
         for (int i = 0; i < 5; ++i) QCOMPARE(cells[i].kind, CellKind::Downloaded);
         for (int i = 5; i < 10; ++i) QCOMPARE(cells[i].kind, CellKind::Error);
+    }
+    void grid_straddling_boundary_all_downloaded() {
+        // Segment boundary at 500 misaligned with 7 cells (~142 bytes each):
+        // cell 3 spans [428,571), crossing the boundary. Pre-fix it stayed
+        // Pending (owner-of-start test could never reach cellEnd). Uses Queued
+        // to exercise the range logic, NOT the Completed short-circuit.
+        auto s = segs2(1000);
+        s[0].current = 500;    // seg0 [0..499] complete
+        s[1].current = 1000;   // seg1 [500..999] complete
+        auto cells = computeCells(1000, s, DownloadState::Queued, 7);
+        QCOMPARE(cells.size(), 7);
+        for (const auto& c : cells) QCOMPARE(c.kind, CellKind::Downloaded);
+    }
+    void grid_completed_fills_all_even_misaligned() {
+        // Completed short-circuit must fill every cell even when boundaries
+        // don't align to cell edges.
+        auto s = segs2(1000); s[0].current = 500; s[1].current = 1000;
+        auto cells = computeCells(1000, s, DownloadState::Completed, 7);
+        for (const auto& c : cells) QCOMPARE(c.kind, CellKind::Downloaded);
     }
     void grid_unknown_total_all_pending() {
         auto cells = computeCells(-1, {}, DownloadState::Downloading, 6);
@@ -694,6 +715,14 @@ private slots:
         QCOMPARE(nameEdit->text(), QString("file.zip"));       // fallback mantido
     }
 
+    void newDialogFieldsGrow() {
+        NewDownloadDialog d(nullptr, QUrl("https://h/x.bin"));
+        auto* form = d.findChild<QFormLayout*>();
+        QVERIFY(form != nullptr);
+        QCOMPARE(form->fieldGrowthPolicy(), QFormLayout::AllNonFixedFieldsGrow);
+        QVERIFY(d.minimumWidth() >= 480);
+    }
+
     // --- Task 11: CategoryTree --------------------------------------------
 
     void tree_emits_filter_on_selection() {
@@ -865,6 +894,15 @@ private slots:
         QVERIFY(out.browser.enabled);
         QCOMPARE(out.browser.port, quint16(8697));
         QVERIFY(!out.browser.token.isEmpty());     // gerado ao habilitar
+    }
+
+    // --- Task 4 (Fase 4): Appearance tab and theme preference ---------------
+
+    void preferences_roundtrips_theme() {
+        AppSettings in;
+        in.ui.theme = ThemePref::Dark;
+        PreferencesDialog dlg(in);
+        QVERIFY(dlg.result().ui.theme == ThemePref::Dark);
     }
 
     // --- Task 14 (Fase 4): SchedulerDialog ----------------------------------
@@ -1068,6 +1106,59 @@ private slots:
             {QByteArray("Cookie"), QByteArray("k=v")}));
     }
 
+    // --- Task 4 (Fase 5): receiveLink flow + background download + reconcile
+
+    void reconcileAcceptChangedDestRetargets() {
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        DownloadTableModel model(&mgr);
+        MainWindow w(&mgr, &model, nullptr);
+        const QUrl url("https://h/file.bin");
+        const QUuid id = w.beginBackgroundLinkForTest(url, {});
+        const QString newDest = QDir(dir.path()).filePath("chosen.bin");
+        w.reconcileReceivedLinkForTest(id, url, {}, /*accepted=*/true, url, newDest);
+        QCOMPARE(mgr.taskById(id)->record().destPath, newDest);
+        QVERIFY(!mgr.taskById(id)->provisionalName());          // cleared on confirm
+    }
+    void reconcileCancelDiscardsTask() {
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        DownloadTableModel model(&mgr);
+        MainWindow w(&mgr, &model, nullptr);
+        const QUrl url("https://h/file.bin");
+        const int before = model.rowCount();
+        const QUuid id = w.beginBackgroundLinkForTest(url, {});
+        QCOMPARE(model.rowCount(), before + 1);
+        w.reconcileReceivedLinkForTest(id, url, {}, /*accepted=*/false, url, QString());
+        QVERIFY(mgr.taskById(id) == nullptr);                  // fully removed
+        QCOMPARE(model.rowCount(), before);
+    }
+    void reconcileChangedUrlRestarts() {
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        DownloadTableModel model(&mgr);
+        MainWindow w(&mgr, &model, nullptr);
+        const QUrl urlA("https://h/a.bin");
+        const QUrl urlB("https://h/b.bin");
+        const QUuid id = w.beginBackgroundLinkForTest(urlA, {});
+        const QString destB = QDir(dir.path()).filePath("b.bin");
+        w.reconcileReceivedLinkForTest(id, urlA, {}, /*accepted=*/true, urlB, destB);
+        QVERIFY(mgr.taskById(id) == nullptr);                  // original discarded
+        const auto tasks = mgr.tasks();
+        QVERIFY(!tasks.isEmpty());
+        QCOMPARE(tasks.last()->record().url, urlB);            // restarted for the new URL
+    }
+    void secondLinkWhileDialogOpenEnqueuesDirectly() {
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        DownloadTableModel model(&mgr);
+        MainWindow w(&mgr, &model, nullptr);
+        w.setDialogOpenForTest(true);                          // simulate a New dialog already up
+        const int before = model.rowCount();
+        w.emitBrowserDownloadForTest(QUrl("https://h/big.iso"), {}, "big.iso");
+        QCOMPARE(model.rowCount(), before + 1);               // background-enqueued, no modal
+    }
+
     // Fix (Task 8, Fase 5, spec §7): o bridge deve ser reaplicado ao mudar as
     // Preferences, não só na inicialização. Como dirigir o QDialog modal do
     // Preferences é inviável offscreen, testamos o helper compartilhado
@@ -1145,6 +1236,17 @@ private slots:
         // Open: só Completed.
         QVERIFY(ctxCanOpen(S::Completed));
         QVERIFY(!ctxCanOpen(S::Paused));
+    }
+
+    // --- Task 3: Theme module ---------------------------------------------------
+
+    void gridColors_keeps_orbit_identity_colors() {
+        const GridColors c = gridColors();
+        QCOMPARE(c.downloaded, QColor("#5b9bd5"));
+        QCOMPARE(c.active,     QColor("#f7941e"));
+        QCOMPARE(c.error,      QColor("#ef4444"));
+        QVERIFY(c.background.isValid());
+        QVERIFY(c.pending.isValid());
     }
 };
 

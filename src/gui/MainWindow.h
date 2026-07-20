@@ -42,10 +42,21 @@ public:
     void          clearCompletedForTest() { clearCompleted(); }
     void          emitBrowserDownloadForTest(const QUrl& url, const HeaderList& headers,
                                              const QString& filename) {
+        const bool prev = m_dialogOpen;
+        m_dialogOpen = true;                 // headless: take the background+tray branch (no exec)
         onBrowserDownload(url, headers, filename);
+        m_dialogOpen = prev;
     }
     void          applyBrowserBridgeForTest(const BrowserPrefs& b) { applyBrowserBridge(b); }
     bool          bridgeListeningForTest() const;
+    QUuid beginBackgroundLinkForTest(const QUrl& url, const HeaderList& h) {
+        return beginBackgroundLink(url, h);
+    }
+    void  reconcileReceivedLinkForTest(const QUuid& id, const QUrl& origUrl, const HeaderList& h,
+                                       bool accepted, const QUrl& chosenUrl, const QString& chosenDest) {
+        reconcileReceivedLink(id, origUrl, h, accepted, chosenUrl, chosenDest);
+    }
+    void  setDialogOpenForTest(bool v) { m_dialogOpen = v; }
 protected:
     void dragEnterEvent(QDragEnterEvent* e) override;
     void dropEvent(QDropEvent* e) override;
@@ -77,6 +88,10 @@ private:
     QString defaultDir() const;
     void    addUrlViaDialog(const QUrl& prefill);
     void    enqueue(const QUrl& url, const QString& dir);
+    QUuid beginBackgroundLink(const QUrl& url, const HeaderList& headers);
+    void  receiveLink(const QUrl& url, const HeaderList& headers);
+    void  reconcileReceivedLink(const QUuid& id, const QUrl& origUrl, const HeaderList& headers,
+                                bool accepted, const QUrl& chosenUrl, const QString& chosenDest);
     void    showLinkNotification(const QUrl& url);
     void    clearLinkNotification();
     void    routeSchedAction(SchedAction a);
@@ -93,6 +108,7 @@ private:
     ClipboardWatcher*    m_clip;
     QLabel*              m_notice = nullptr;   // notificação clicável do modo Notify (ou nullptr)
     QString              m_lastDir;   // pasta padrão: última escolhida NESTA sessão (spec §3.7)
+    bool                 m_dialogOpen = false;   // guard: don't stack New dialogs
     AppSettings           m_settings;
     QString               m_settingsPath;
     QActionGroup*         m_clipGroup = nullptr;   // p/ refletir o modo persistido no menu

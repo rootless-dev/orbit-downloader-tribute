@@ -61,6 +61,8 @@ NewDownloadDialog::NewDownloadDialog(QWidget* parent, const QUrl& prefill) : QDi
     dirLay->addWidget(browse);
 
     auto* form = new QFormLayout(this);
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+    setMinimumWidth(480);
     form->addRow("URL:", m_url);
     form->addRow("Save to:", dirRow);
     form->addRow("File:", m_name);

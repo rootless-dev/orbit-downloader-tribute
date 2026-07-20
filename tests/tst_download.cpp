@@ -1251,6 +1251,68 @@ private slots:
         QVERIFY(QFile::exists(dir.filePath("Audiobook.m4a")));
     }
 
+    void retargetOnCompletedMovesAndRenames() {
+        TestServer srv(m_body);
+        QVERIFY(srv.listen());
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        const QUuid id = mgr.addDownload(srv.url("/ranged"), dir.filePath("orig.bin"));
+        QVERIFY(waitForState(mgr, id, DownloadState::Completed, 5000));
+        QTemporaryDir dir2;
+        const QString newPath = QDir(dir2.path()).filePath("renamed.bin");
+        QVERIFY(mgr.retarget(id, newPath));
+        QCOMPARE(mgr.taskById(id)->record().destPath, newPath);
+        QVERIFY(QFile::exists(newPath));
+        QVERIFY(!QFile::exists(dir.filePath("orig.bin")));
+        QFile f(newPath); QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), m_body);
+    }
+    void retargetNoOpWhenSamePath() {
+        TestServer srv(m_body);
+        QVERIFY(srv.listen());
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        const QString p = dir.filePath("keep.bin");
+        const QUuid id = mgr.addDownload(srv.url("/ranged"), p);
+        QVERIFY(waitForState(mgr, id, DownloadState::Completed, 5000));
+        QVERIFY(mgr.retarget(id, p));                       // same path -> true, undisturbed
+        QCOMPARE(mgr.taskById(id)->record().destPath, p);
+        QVERIFY(QFile::exists(p));
+    }
+    void retargetResolvesUniqueOnCollision() {
+        TestServer srv(m_body);
+        QVERIFY(srv.listen());
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        const QUuid id = mgr.addDownload(srv.url("/ranged"), dir.filePath("a.bin"));
+        QVERIFY(waitForState(mgr, id, DownloadState::Completed, 5000));
+        QTemporaryDir dir2;
+        const QString taken = QDir(dir2.path()).filePath("b.bin");
+        { QFile pre(taken); QVERIFY(pre.open(QIODevice::WriteOnly)); pre.write("x"); }
+        QVERIFY(mgr.retarget(id, taken));                   // collides -> "b (1).bin"
+        const QString got = mgr.taskById(id)->record().destPath;
+        QVERIFY(got != taken);
+        QVERIFY(QFile::exists(got));
+    }
+    void retargetActiveDownloadPreservesBytes() {
+        SKIP_IF_CI_TIMING();                                // mid-flight observation; see issue #1
+        const QByteArray big = makeBody(2 * 1024 * 1024);
+        TestServer srv(big);
+        QVERIFY(srv.listen());
+        QTemporaryDir dir;
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        const QUuid id = mgr.addDownload(srv.url("/ranged"), dir.filePath("live.bin"));
+        QVERIFY(waitForState(mgr, id, DownloadState::Downloading, 5000));
+        QTemporaryDir dir2;
+        const QString newPath = QDir(dir2.path()).filePath("moved.bin");
+        QVERIFY(mgr.retarget(id, newPath));                 // pauses, moves partial+.meta, resumes
+        QVERIFY(waitForState(mgr, id, DownloadState::Completed, 10000));
+        QCOMPARE(mgr.taskById(id)->record().destPath, newPath);
+        QFile f(newPath); QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), big);
+        QVERIFY(!QFile::exists(dir.filePath("live.bin")));
+    }
+
     // O diálogo New passa provisionalName=false (padrão): o nome que o usuário
     // escolheu é mantido, mesmo que o servidor mande um Content-Disposition.
     void nonProvisionalKeepsGivenName() {
