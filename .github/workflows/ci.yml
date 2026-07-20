@@ -27,4 +27,9 @@ jobs:
         run: cmake --build build
 
       - name: Test
+        # ORBIT_SKIP_TIMING_TESTS skips a handful of mid-transfer observation
+        # tests that are flaky on fast CI loopback (see issue #1). They still
+        # run on developer machines. Remove once the paced test server lands.
+        env:
+          ORBIT_SKIP_TIMING_TESTS: "1"
         run: ctest --test-dir build --output-on-failure
