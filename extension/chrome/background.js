@@ -13,6 +13,17 @@
 
 const DEFAULTS = { enabled: false, port: 8697, token: "" };
 
+// Retry the handoff a few times before falling back, so a download doesn't
+// escape to the browser just because Orbit was briefly unreachable (e.g. a
+// restart). 4 attempts with the three backoff delays below spread the retries
+// over ~6.5 s total — long enough to ride out a typical restart. Bounded and
+// short on purpose: MV3 service workers can be suspended during a long await,
+// so this is best-effort, not a durable queue — a worker killed mid-retry
+// still falls back.
+const HANDOFF_MAX_ATTEMPTS = 4;
+const HANDOFF_BACKOFF_MS = [500, 1500, 4500];   // delay BEFORE attempt i (i>0)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // In-memory config so onCreated can decide + cancel synchronously (no await).
 // Kept in sync with chrome.storage.local. NOTE (MV3 caveat): the service worker
 // is non-persistent; right after a cold start `cfg` holds DEFAULTS until the
@@ -76,16 +87,23 @@ async function handoff(url, referrer, filename) {
     userAgent: navigator.userAgent,
     cookie: await cookieHeader(url),
   };
-  try {
-    const resp = await fetch(`http://127.0.0.1:${cfg.port}/add`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Orbit-Token": cfg.token },
-      body: JSON.stringify(payload),
-    });
-    if (resp.ok) { notify("Sent to Orbit"); return; }
-    notify("Orbit refused the download — falling back to the browser");
-  } catch (e) {
-    notify("Orbit not reachable — falling back to the browser");
+  for (let attempt = 0; attempt < HANDOFF_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) await sleep(HANDOFF_BACKOFF_MS[attempt - 1]);
+    try {
+      const resp = await fetch(`http://127.0.0.1:${cfg.port}/add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Orbit-Token": cfg.token },
+        body: JSON.stringify(payload),
+      });
+      // Reachable: the connection works, so don't retry regardless of status.
+      if (resp.ok) { notify("Sent to Orbit"); return; }
+      notify("Orbit refused the download — falling back to the browser");
+      break;
+    } catch (e) {
+      // Unreachable (app down / connection refused): retry with backoff.
+      if (attempt < HANDOFF_MAX_ATTEMPTS - 1) continue;
+      notify("Orbit not reachable — falling back to the browser");
+    }
   }
 
   // Fail-safe: we already cancelled, so re-issue the download ourselves. No

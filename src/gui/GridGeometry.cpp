@@ -19,11 +19,23 @@ QVector<Cell> computeCells(qint64 totalBytes,
         const qint64 cellStart = static_cast<qint64>(i)     * totalBytes / nCells;
         const qint64 cellEnd   = static_cast<qint64>(i + 1) * totalBytes / nCells; // exclusive
         const int owner = ownerSegment(cellStart, segments);
-        bool downloaded = false;
-        if (owner >= 0) {
-            for (const Segment& s : segments)
-                if (s.index == owner) { downloaded = (s.current >= cellEnd); break; }
+
+        // Downloaded iff every segment overlapping [cellStart, cellEnd) has
+        // fetched its whole portion of the cell. This covers cells that
+        // straddle a segment boundary (the old code only checked the segment
+        // owning cellStart, leaving boundary cells gray at 100%).
+        bool anyCover = false;
+        bool downloaded = true;
+        for (const Segment& s : segments) {
+            const qint64 sEndExcl = (s.end < 0) ? cellEnd : s.end + 1; // exclusive end
+            const bool overlaps = s.start < cellEnd && sEndExcl > cellStart;
+            if (!overlaps) continue;
+            anyCover = true;
+            if (s.current < qMin(cellEnd, sEndExcl)) { downloaded = false; break; }
         }
+        downloaded = downloaded && anyCover;
+        if (state == DownloadState::Completed) downloaded = true;  // defensive fill
+
         qint64 cur = -1;
         for (const Segment& s : segments)
             if (s.index == owner) { cur = s.current; break; }

@@ -30,6 +30,7 @@ public:
     void  cancel(const QUuid& id);
     void  setPriority(const QUuid& id, Priority p);
     bool  moveFiles(const QUuid& id, const QString& newDir);
+    bool  retarget(const QUuid& id, const QString& newDestPath);
     void  provideCredentials(const QUuid& id, const QString& user, const QString& pass);
     Transport* transportFor(const QUrl& url) const;   // nullptr se esquema desconhecido
 signals:

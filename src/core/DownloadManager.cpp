@@ -222,6 +222,33 @@ bool DownloadManager::moveFiles(const QUuid& id, const QString& newDir) {
     return true;
 }
 
+// Retarget a download to a new FULL path (directory and/or basename), preserving
+// bytes already fetched. Unlike moveFiles (dir-only, keeps basename, refuses while
+// active), retarget pauses an active download, renames+moves the partial + .meta,
+// updates the path, and resumes. Safe for Completed/Paused/Queued (pause/resume are
+// no-ops there). Returns false on IO failure, leaving the task resumed at old path.
+bool DownloadManager::retarget(const QUuid& id, const QString& newDestPath) {
+    DownloadTask* t = taskById(id);
+    if (!t) return false;
+    const QString oldPath = t->record().destPath;
+    if (newDestPath == oldPath) return true;               // no change requested
+    const QString finalPath = Persistence::resolveUniquePath(newDestPath);
+    const DownloadState s = t->state();
+    const bool wasActive = (s == DownloadState::Downloading || s == DownloadState::Connecting);
+    if (wasActive) pause(id);                              // safe hold; stops workers/writes
+    if (QFileInfo::exists(oldPath) && !QFile::rename(oldPath, finalPath)) {
+        if (wasActive) resume(id);
+        return false;
+    }
+    const QString oldMeta = Persistence::metaPath(oldPath);
+    if (QFileInfo::exists(oldMeta))
+        QFile::rename(oldMeta, Persistence::metaPath(finalPath));
+    t->setDestPath(finalPath);
+    saveSession();
+    if (wasActive) resume(id);
+    return true;
+}
+
 // Credenciais vivem SÓ em memória, nunca no .meta (spec §3.6): senha em texto
 // puro no disco não. Depois de recarregar a sessão, a app pergunta de novo.
 void DownloadManager::provideCredentials(const QUuid& id, const QString& user, const QString& pass) {
