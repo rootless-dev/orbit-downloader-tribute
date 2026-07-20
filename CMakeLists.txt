@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
-project(orbit_downloader_tribute LANGUAGES CXX)
+project(orbit_downloader_tribute VERSION 0.1.0 LANGUAGES CXX)
+
+# A CI passa a versão da tag via -DORBIT_VERSION; localmente cai no default do project().
+if(DEFINED ORBIT_VERSION AND NOT ORBIT_VERSION STREQUAL "")
+  set(PROJECT_VERSION "${ORBIT_VERSION}")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
