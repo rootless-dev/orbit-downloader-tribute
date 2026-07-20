@@ -50,6 +50,18 @@ private slots:
         QVERIFY(back.scheduler.recurrence == Recurrence::Once);
         QVERIFY(back.scheduler.quitWhenDone);
     }
+    void themeRoundTrips() {
+        AppSettings s;
+        s.ui.theme = ThemePref::Dark;
+        const QJsonObject j = SettingsIo::toJson(s, QJsonObject{});
+        QCOMPARE(j.value("ui").toObject().value("theme").toString(), QString("dark"));
+        const AppSettings back = SettingsIo::fromJson(j, EngineConfig{});
+        QVERIFY(back.ui.theme == ThemePref::Dark);
+    }
+    void themeDefaultsToSystemWhenMissing() {
+        const AppSettings back = SettingsIo::fromJson(QJsonObject{}, EngineConfig{});
+        QVERIFY(back.ui.theme == ThemePref::System);
+    }
     void missingFileGivesDefaults() {
         const AppSettings s = SettingsIo::load("/no/such/settings.json", EngineConfig{});
         QCOMPARE(s.engine.segmentCount, EngineConfig{}.segmentCount);

@@ -7,6 +7,8 @@
 
 enum class Recurrence { Once, Daily };
 
+enum class ThemePref { System, Light, Dark };
+
 struct BrowserPrefs {
     bool    enabled = false;
     quint16 port    = 8697;
@@ -16,6 +18,7 @@ struct BrowserPrefs {
 struct UiPrefs {
     QString       defaultDownloadDir;                 // vazio => boot resolve p/ Downloads
     ClipboardMode clipboardMode = ClipboardMode::Off;
+    ThemePref     theme         = ThemePref::System;
 };
 
 struct SchedulerConfig {
