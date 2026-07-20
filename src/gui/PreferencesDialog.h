@@ -20,6 +20,8 @@ public:
 
 private:
     AppSettings m_base;                 // preserva campos não editados (timeouts avançados etc.)
+    // Appearance
+    QComboBox* m_theme      = nullptr;
     // General
     QSpinBox*  m_concurrent = nullptr;
     QSpinBox*  m_segments   = nullptr;

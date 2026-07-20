@@ -16,6 +16,7 @@
 #include "ContextMenuRules.h"
 #include "BrowserBridge.h"
 #include "BrowserBridgeProtocol.h"   // kExtensionOrigin
+#include "Theme.h"
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
@@ -539,6 +540,7 @@ void MainWindow::setClipboardMode(ClipboardMode m) {
 void MainWindow::applySettings(const AppSettings& s, const QString& settingsPath) {
     m_settings     = s;
     m_settingsPath = settingsPath;
+    applyTheme(s.ui.theme);
     m_clip->setMode(s.ui.clipboardMode);
     if (m_clipGroup) {
         for (QAction* a : m_clipGroup->actions())

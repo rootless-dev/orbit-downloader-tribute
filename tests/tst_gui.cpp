@@ -887,6 +887,15 @@ private slots:
         QVERIFY(!out.browser.token.isEmpty());     // gerado ao habilitar
     }
 
+    // --- Task 4 (Fase 4): Appearance tab and theme preference ---------------
+
+    void preferences_roundtrips_theme() {
+        AppSettings in;
+        in.ui.theme = ThemePref::Dark;
+        PreferencesDialog dlg(in);
+        QVERIFY(dlg.result().ui.theme == ThemePref::Dark);
+    }
+
     // --- Task 14 (Fase 4): SchedulerDialog ----------------------------------
 
     void scheduler_dialog_result_reflects_widgets() {

@@ -25,6 +25,17 @@ PreferencesDialog::PreferencesDialog(const AppSettings& current, QWidget* parent
     setWindowTitle(tr("Preferences"));
     auto* tabs = new QTabWidget(this);
 
+    // ---- Appearance (first tab) ----
+    auto* appr = new QWidget(this);
+    auto* apf  = new QFormLayout(appr);
+    m_theme = new QComboBox(appr);
+    m_theme->addItem(tr("System"), int(ThemePref::System));
+    m_theme->addItem(tr("Light"),  int(ThemePref::Light));
+    m_theme->addItem(tr("Dark"),   int(ThemePref::Dark));
+    m_theme->setCurrentIndex(m_theme->findData(int(current.ui.theme)));
+    apf->addRow(tr("Theme:"), m_theme);
+    tabs->addTab(appr, tr("Appearance"));
+
     // ---- General ----
     auto* gen = new QWidget(this);
     auto* gf  = new QFormLayout(gen);
@@ -160,6 +171,7 @@ AppSettings PreferencesDialog::result() const {
     s.engine.userAgent = preset.isEmpty() ? m_uaCustom->text() : preset;
     s.ui.defaultDownloadDir = m_dir->text();
     s.ui.clipboardMode = ClipboardMode(m_clipMode->currentData().toInt());
+    s.ui.theme = ThemePref(m_theme->currentData().toInt());
     s.browser.enabled = m_brEnabled->isChecked();
     s.browser.port    = quint16(m_brPort->value());
     s.browser.token   = m_brTokenValue;
