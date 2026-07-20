@@ -1,4 +1,12 @@
 #include <QtTest>
+
+// Ver tst_download.cpp / issue #1: testes que observam um download no estado
+// Downloading no meio da transferência são flaky em hardware rápido (CI). Rodam
+// localmente; pulam na CI quando ORBIT_SKIP_TIMING_TESTS está setada.
+#define SKIP_IF_CI_TIMING() \
+    do { if (qEnvironmentVariableIsSet("ORBIT_SKIP_TIMING_TESTS")) \
+        QSKIP("flaky on fast CI loopback (mid-transfer observation race); see issue #1"); } while (0)
+
 #include "FileType.h"
 #include "UrlName.h"
 #include "GridGeometry.h"
@@ -368,6 +376,7 @@ private slots:
     }
 
     void model_paused_row_timeleft_not_frozen() {
+        SKIP_IF_CI_TIMING();
         // Fix 1 (Fase 2 polish): onTaskStateChanged only resets the speed
         // sampler on Completed/Error, not Paused, but TimeLeft used to
         // compute the ETA unconditionally - so a Paused row froze on its

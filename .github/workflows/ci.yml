@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test (macOS arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install qt cmake
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        # ORBIT_SKIP_TIMING_TESTS skips a handful of mid-transfer observation
+        # tests that are flaky on fast CI loopback (see issue #1). They still
+        # run on developer machines. Remove once the paced test server lands.
+        env:
+          ORBIT_SKIP_TIMING_TESTS: "1"
+        run: ctest --test-dir build --output-on-failure

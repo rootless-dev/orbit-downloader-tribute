@@ -12,6 +12,22 @@ It is an independent tribute/reimplementation — not affiliated with the origin
 
 ---
 
+## Install
+
+Download the latest **`Orbit-<version>-arm64.dmg`** from the
+[**Releases**](https://github.com/rootless-dev/orbit-downloader-tribute/releases) page, open it, and
+drag **Orbit.app** into **Applications**.
+
+> **Apple Silicon only.** The DMG targets arm64 Macs.
+>
+> **First launch (unsigned app).** The app is not signed/notarized, so macOS Gatekeeper will warn
+> about an "unidentified developer". Open it once via **right-click → Open** (or **System Settings →
+> Privacy & Security → Open Anyway**); after that it launches normally.
+
+Prefer to build it yourself? See [Build, test, and run](#build-test-and-run) below.
+
+---
+
 ## What it does today
 
 - **Multi-segment downloads** (the classic accelerator) for **HTTP/HTTPS** and **FTP**, with
@@ -163,8 +179,10 @@ HTTP/FTP/loopback server), so they don't depend on the network.
 
 ### Launch the app
 
+On macOS the GUI builds as an app bundle:
+
 ```bash
-./build/src/gui/orbit-gui
+open build/src/gui/Orbit.app
 ```
 
 (There is also `./build/src/cli/orbit-cli` for command-line use.)
