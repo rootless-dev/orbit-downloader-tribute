@@ -1,189 +1,200 @@
 # Orbit Downloader Tribute
 
-Reimplementação em **C++20 / Qt 6** do clássico gerenciador de downloads **Orbit Downloader**
-(Windows XP), replicando as funcionalidades e o layout da GUI original: toolbar, árvore de categorias,
-tabela de downloads e a característica **grade de blocos coloridos** que mostra o progresso de cada
-segmento do arquivo.
+A **C++20 / Qt 6** reimplementation of the classic **Orbit Downloader** download manager
+(Windows XP), reproducing the original's features and GUI layout: toolbar, category tree,
+download table, and the signature **colored block grid** that shows the progress of each
+file segment.
 
-É um tributo/reimplementação independente — não afiliado ao Orbit Downloader original.
+It is an independent tribute/reimplementation — not affiliated with the original Orbit Downloader.
 
-> **Aviso:** projeto pessoal em desenvolvimento ativo. macOS é a plataforma primária; o código é
-> portável (Qt) para Windows/Linux em fases futuras.
+> **Notice:** personal project under active development. macOS is the primary platform; the code is
+> portable (Qt) to Windows/Linux in future phases.
 
 ---
 
-## O que ele faz hoje
+## What it does today
 
-- **Downloads multi-segmento** (acelerador clássico) para **HTTP/HTTPS** e **FTP**, com pausa/retomada
-  que sobrevive ao fechamento do app.
-- **Detecção automática do nome do arquivo** a partir do header `Content-Disposition` — arquivos de
-  URLs tipo `.../download?id=...` (ex.: Google Drive) são salvos com o nome e a extensão corretos, não
-  como `download`.
-- **User-Agent configurável** (padrão `curl/8.7.1`) — destrava servidores que **bloqueiam** o
-  User-Agent de navegador (ex.: alguns links protegidos por Cloudflare) e liberam clientes tipo curl.
-- **Limite de banda global** — um teto único de velocidade compartilhado por todos os downloads.
-- **Scheduler:** iniciar/pausar a fila por horário (recorrência **diária** ou **única**) e, opcional,
-  **fechar o app** quando tudo concluir — diálogo próprio com botão no toolbar.
-- **Preferences** (abas **General** + **Advanced**): downloads simultâneos, segmentos por download,
-  velocidade máxima, pasta padrão, modo do monitor de clipboard, User-Agent e ajustes avançados
+- **Multi-segment downloads** (the classic accelerator) for **HTTP/HTTPS** and **FTP**, with
+  pause/resume that survives closing the app.
+- **Automatic filename detection** from the `Content-Disposition` header — files from URLs like
+  `.../download?id=...` (e.g. Google Drive) are saved with the correct name and extension, not as
+  `download`.
+- **Configurable User-Agent** (default `curl/8.7.1`) — unblocks servers that **reject** the
+  browser User-Agent (e.g. some Cloudflare-protected links) but allow curl-like clients.
+- **Global bandwidth limit** — a single shared speed cap across all downloads.
+- **Scheduler:** start/pause the queue on a schedule (**daily** or **one-time** recurrence) and,
+  optionally, **quit the app** when everything finishes — its own dialog with a toolbar button.
+- **Preferences** (**General** + **Advanced** tabs): concurrent downloads, segments per download,
+  maximum speed, default folder, clipboard-monitor mode, User-Agent, and advanced tuning
   (timeouts, retries, backoff…).
-- **Configuração persistida em `settings.json`** — as preferências, o modo de clipboard e a pasta
-  padrão sobrevivem ao fechamento do app.
-- **GUI no estilo Orbit:** barra de menus (**File / Edit / View / Tools / Help**, nativa no macOS),
-  toolbar (New, Start, Pause, Delete, Scheduler, Preferences…), árvore de categorias
-  (Downloading / Completed / Movie / Software / Music / Others), tabela de downloads e abas
-  **Log / Progress / Properties** com a grade de blocos por segmento.
-- **Formas de adicionar downloads:** diálogo New (colar URL), monitor de área de transferência,
-  drag & drop de links na janela e **extensão de navegador** (Chrome/Chromium) que **intercepta**
-  os downloads e os entrega ao app (ver [Browser integration](#browser-integration)).
+- **Configuration persisted in `settings.json`** — preferences, clipboard mode, and the default
+  folder survive closing the app.
+- **Orbit-style GUI:** menu bar (**File / Edit / View / Tools / Help**, native on macOS),
+  toolbar (New, Start, Pause, Delete, Scheduler, Preferences…), category tree
+  (Downloading / Completed / Movie / Software / Music / Others), download table, and
+  **Log / Progress / Properties** tabs with the per-segment block grid.
+- **Ways to add downloads:** New dialog (paste a URL), clipboard monitor, drag & drop of links
+  onto the window, and a **browser extension** (Chrome/Chromium) that **intercepts** downloads and
+  hands them to the app (see [Browser integration](#browser-integration)).
 
-### Em construção / próximas fases
+### In progress / upcoming phases
 
-- **P2P/P2SP:** fora do escopo **por enquanto**, mas planejado para entrar em breve.
-- **Instalação assistida da extensão** — hoje ela é carregada manualmente como "unpacked".
+- **P2P/P2SP:** out of scope **for now**, but planned to arrive soon.
+- **Assisted extension install** — today it is loaded manually as "unpacked".
 
-Fora de escopo (provavelmente permanente): captura de streaming.
+Out of scope (likely permanent): streaming capture.
 
 ---
 
-## Arquitetura em uma olhada
+## Architecture at a glance
 
-| Componente | O que é |
+| Component | What it is |
 |---|---|
-| `orbitcore` | Biblioteca estática do **motor de download** (HTTP + FTP), sem dependência de interface gráfica — testável de forma isolada (headless). |
-| `orbit-gui` | Aplicativo com a interface QtWidgets, montado sobre o `orbitcore`. |
-| `orbit-cli` | Driver de linha de comando usado para testes ponta-a-ponta do motor. |
+| `orbitcore` | Static library for the **download engine** (HTTP + FTP), with no GUI dependency — testable in isolation (headless). |
+| `orbit-gui` | The QtWidgets application, built on top of `orbitcore`. |
+| `orbit-cli` | A command-line driver used for end-to-end testing of the engine. |
 
-Toda a rede roda no **event loop principal** do Qt (I/O assíncrono, sem threads na fundação):
-HTTP/HTTPS via `QNetworkAccessManager`, FTP via `QTcpSocket`. HTTP e FTP compartilham a mesma máquina
-de estados (segmentação, resume, cap de concorrência) através de uma abstração `Transport`.
+All networking runs on Qt's **main event loop** (asynchronous I/O, no threads at the foundation):
+HTTP/HTTPS via `QNetworkAccessManager`, FTP via `QTcpSocket`. HTTP and FTP share the same state
+machine (segmentation, resume, concurrency cap) through a `Transport` abstraction.
 
 ---
 
 ## Browser integration
 
-O Orbit oferece uma **extensão do Chrome/Chromium** que **intercepta os downloads do navegador** e os entrega ao aplicativo. A extensão cancela o download no navegador **antes** de o Chrome abrir a caixa "Salvar como", e o Orbit assume — reaproveitando os **cookies da sessão** (downloads logados funcionam) e salvando com o **nome real** que o servidor informa (via `Content-Disposition`), não como `download`.
+Orbit ships a **Chrome/Chromium extension** that **intercepts browser downloads** and hands them to
+the application. The extension cancels the download in the browser **before** Chrome opens the "Save
+as" dialog, and Orbit takes over — reusing the **session cookies** (logged-in downloads work) and
+saving with the **real name** the server reports (via `Content-Disposition`), not as `download`.
 
-### Como habilitar
+### How to enable
 
-1. **No aplicativo Orbit:**
-   - Abra **Preferences** (aba **Browser**)
-   - Marque **Enable browser bridge**
-   - Copie o token que aparecer (uma chave de segurança única)
-   - Anote a porta (padrão: **8697**)
+1. **In the Orbit app:**
+   - Open **Preferences** (the **Browser** tab)
+   - Check **Enable browser bridge**
+   - Copy the token that appears (a unique security key)
+   - Note the port (default: **8697**)
 
-2. **No navegador:**
-   - Navegue até `chrome://extensions`
-   - Ative o **Developer mode** (canto superior direito)
-   - Clique em **Load unpacked** e selecione a pasta `extension/chrome/` do projeto
-   - A extensão aparecerá com um ícone do Orbit
-   - Clique com o botão direito no ícone da extensão → **Options**
-   - Cole o token e a porta copiados acima
-   - Marque **Intercept downloads** e clique **Save**
+2. **In the browser:**
+   - Go to `chrome://extensions`
+   - Turn on **Developer mode** (top-right corner)
+   - Click **Load unpacked** and select the project's `extension/chrome/` folder
+   - The extension shows up with an Orbit icon
+   - Right-click the extension icon → **Options**
+   - Paste the token and port copied above
+   - Check **Intercept downloads** and click **Save**
 
-Para detalhes de compilação e estrutura da extensão, veja [`extension/chrome/README.md`](extension/chrome/README.md).
+For build details and the extension's structure, see [`extension/chrome/README.md`](extension/chrome/README.md).
 
-**Nota de segurança:** o endpoint escuta apenas em `127.0.0.1` (loopback) e exige um **token** — páginas web e outras extensões não conseguem injetar downloads. (Um processo local rodando como o mesmo usuário pode ler o token do `settings.json`; isso está fora do modelo de ameaça, é a mesma fronteira de confiança do próprio app.)
+**Security note:** the endpoint listens only on `127.0.0.1` (loopback) and requires a **token** — web
+pages and other extensions cannot inject downloads. (A local process running as the same user can
+read the token from `settings.json`; that is outside the threat model — it is the same trust boundary
+as the app itself.)
 
-**Nota (MV3):** o *service worker* da extensão é não-persistente. No **primeiríssimo** download logo após o navegador acordar o worker, a caixa "Salvar como" pode aparecer uma vez; os downloads seguintes interceptam sem caixa.
+**Note (MV3):** the extension's *service worker* is non-persistent. On the **very first** download
+right after the browser wakes the worker, the "Save as" dialog may appear once; subsequent downloads
+intercept without a dialog.
 
 ### Browser integration — manual E2E
 
-Os seguintes testes **não podem ser automáticos** e devem ser executados manualmente uma vez por release:
+The following tests **cannot be automated** and should be run manually once per release:
 
-1. Carregar a extensão unpacked; habilitar em Preferences; colar token + porta nas opções.
-2. Fazer download de um arquivo público → aparece no app com **nome correto** (não `download`), progride com barra e blocos coloridos, tray notification aparece, e o navegador **não abre** a caixa "Salvar como".
-3. Fazer download de um arquivo com autenticação (ex.: usando cookie de sessão) → funciona no app.
-4. Sair/fechar o app → a extensão **re-baixa pelo navegador** (sem caixa) e notifica "Orbit not reachable" — nenhum download é perdido.
-5. Fazer download de um `blob:`/preview file → o navegador maneja, app não interfere.
+1. Load the unpacked extension; enable it in Preferences; paste the token + port into the options.
+2. Download a public file → it appears in the app with the **correct name** (not `download`),
+   progresses with a bar and colored blocks, a tray notification appears, and the browser **does not
+   open** the "Save as" dialog.
+3. Download an authenticated file (e.g. using a session cookie) → it works in the app.
+4. Quit/close the app → the extension **re-downloads through the browser** (no dialog) and notifies
+   "Orbit not reachable" — no download is lost.
+5. Download a `blob:`/preview file → the browser handles it, the app does not interfere.
 
 ---
 
-## Build, testes e execução
+## Build, test, and run
 
-> Todos os comandos são executados **a partir da raiz do projeto**:
+> All commands are run **from the project root**:
 > ```bash
 > cd orbit-downloader-tribute
 > ```
 
-### Requisitos
+### Requirements
 
-- **macOS** com [Homebrew](https://brew.sh)
-- **CMake** e **Qt 6.11** instalados via Homebrew (Qt fica em `/opt/homebrew`)
+- **macOS** with [Homebrew](https://brew.sh)
+- **CMake** and **Qt 6.11** installed via Homebrew (Qt lives in `/opt/homebrew`)
   ```bash
   brew install cmake qt
   ```
 
-### Compilar
+### Build
 
-O projeto usa **CMake**, que gera tudo dentro da pasta `build/`. São dois passos — **configurar**
-(só na primeira vez, ou quando arquivos novos entram no projeto) e **compilar** (sempre que o código
-muda):
+The project uses **CMake**, which generates everything inside the `build/` folder. There are two
+steps — **configure** (only the first time, or when new files are added to the project) and **build**
+(whenever the code changes):
 
 ```bash
-# Passo A — configurar (repita só se der erro de "arquivo/alvo não encontrado")
+# Step A — configure (repeat only if you get a "file/target not found" error)
 cmake -S . -B build -DCMAKE_PREFIX_PATH=/opt/homebrew
 
-# Passo B — compilar tudo
+# Step B — build everything
 cmake --build build
 ```
 
-No dia a dia, normalmente só o **Passo B** é necessário.
+Day to day, usually only **Step B** is needed.
 
-### Rodar os testes
+### Run the tests
 
 ```bash
-# Todos os testes
+# All tests
 ctest --test-dir build --output-on-failure
 ```
 
-No fim aparece algo como `100% tests passed, 0 tests failed out of 13`.
+At the end you'll see something like `100% tests passed, 0 tests failed out of 13`.
 
-Para rodar **um** teste específico, use `-R` com o nome:
+To run a **single** test, use `-R` with its name:
 
 ```bash
 ctest --test-dir build -R tst_gui --output-on-failure
 ```
 
-Suítes disponíveis: `tst_smoke`, `tst_segmentation`, `tst_persistence`, `tst_download`,
+Available suites: `tst_smoke`, `tst_segmentation`, `tst_persistence`, `tst_download`,
 `tst_transport`, `tst_contentdisposition`, `tst_gui`, `tst_ftp`, `tst_settings`, `tst_ratelimiter`,
-`tst_scheduler`, `tst_logger`, `tst_browserbridge`. Os testes são offline (usam um servidor
-HTTP/FTP/loopback em processo), então não dependem de rede.
+`tst_scheduler`, `tst_logger`, `tst_browserbridge`. The tests are offline (they use an in-process
+HTTP/FTP/loopback server), so they don't depend on the network.
 
-### Abrir o aplicativo
+### Launch the app
 
 ```bash
 ./build/src/gui/orbit-gui
 ```
 
-(Existe também `./build/src/cli/orbit-cli` para uso via linha de comando.)
+(There is also `./build/src/cli/orbit-cli` for command-line use.)
 
-### Atalho do dia a dia
+### Everyday shortcut
 
-Compilar e, se compilar, rodar todos os testes de uma vez:
+Build and, if it builds, run all tests at once:
 
 ```bash
 cmake --build build && ctest --test-dir build --output-on-failure
 ```
 
-Se algum dia quiser recomeçar o build do zero, basta apagar a pasta `build/` e rodar o **Passo A**
-novamente — nenhum código-fonte é perdido, só o resultado compilado.
+If you ever want to start the build from scratch, just delete the `build/` folder and run **Step A**
+again — no source code is lost, only the compiled output.
 
 ---
 
-## Estrutura do projeto
+## Project structure
 
 ```
-src/core/    biblioteca orbitcore (motor de download, sem GUI)
-src/gui/     aplicativo orbit-gui (QtWidgets)
-src/cli/     driver orbit-cli
-tests/       suíte de testes (QtTest) + servidores de teste em processo
-docs/        specs e planos de implementação por fase
+src/core/    orbitcore library (download engine, no GUI)
+src/gui/     orbit-gui application (QtWidgets)
+src/cli/     orbit-cli driver
+tests/       test suite (QtTest) + in-process test servers
+docs/        per-phase specs and implementation plans
 ```
 
 ---
 
-## Licença
+## License
 
-Projeto pessoal. Tributo/reimplementação independente, não afiliado ao Orbit Downloader original nem
-aos seus detentores de marca.
+Personal project. An independent tribute/reimplementation, not affiliated with the original Orbit
+Downloader or its trademark holders.
