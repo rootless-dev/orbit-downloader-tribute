@@ -55,6 +55,10 @@ jobs:
           set -euo pipefail
           APP="build/src/gui/Orbit.app"
           "$(brew --prefix qt)/bin/macdeployqt" "$APP"
+          # Re-sign: macdeployqt rewrites install names after signing bundled
+          # dylibs, invalidating their ad-hoc signatures.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
           STAGE="$(mktemp -d)"
           cp -R "$APP" "$STAGE/"
           DMG="Orbit-${VERSION}-arm64.dmg"
