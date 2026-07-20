@@ -1,0 +1,6 @@
+build/
+build-asan/
+.DS_Store
+*.user
+ROADMAP.md
+.idea
