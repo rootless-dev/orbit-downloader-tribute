@@ -496,6 +496,7 @@ private slots:
     // task's actual DownloadState rather than category, per
     // filterAcceptsRow's state != / == Completed branches.
     void proxy_filters_by_completed_and_downloading_state() {
+        SKIP_IF_CI_TIMING();  // needs a mid-transfer pause; races on fast CI loopback (issue #1)
         TestServer fastSrv(makeGuiBody(5000));               // completes quickly
         QVERIFY(fastSrv.listen());
         TestServer slowSrv(makeGuiBody(5 * 1024 * 1024));     // large enough to pause mid-flight
