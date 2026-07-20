@@ -1,0 +1,71 @@
+name: Package DMG
+
+# Decoupled from release-please: a published release (created by release-please
+# via the PAT, so this event fires) triggers the build, and workflow_dispatch
+# lets us (re)build the DMG for any existing tag. Keeping this separate means a
+# hiccup in the release-please job can no longer skip the DMG.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and attach the DMG for
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    name: Build & publish DMG (macOS arm64)
+    runs-on: macos-14
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Resolve version from tag
+        run: echo "VERSION=${TAG##*v}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install dependencies
+        run: brew install qt create-dmg
+
+      - name: Configure (Release)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
+          -DORBIT_VERSION="${VERSION}"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Deploy Qt frameworks & create DMG
+        run: |
+          set -euo pipefail
+          APP="build/src/gui/Orbit.app"
+          "$(brew --prefix qt)/bin/macdeployqt" "$APP"
+          # Re-sign: macdeployqt rewrites install names after signing bundled
+          # dylibs, invalidating their ad-hoc signatures.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+          STAGE="$(mktemp -d)"
+          cp -R "$APP" "$STAGE/"
+          DMG="Orbit-${VERSION}-arm64.dmg"
+          create-dmg \
+            --volname "Orbit ${VERSION}" \
+            --window-size 600 320 \
+            --icon-size 120 \
+            --icon "Orbit.app" 150 170 \
+            --app-drop-link 450 170 \
+            --hide-extension "Orbit.app" \
+            "$DMG" "$STAGE"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - name: Upload DMG to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$DMG" --clobber
