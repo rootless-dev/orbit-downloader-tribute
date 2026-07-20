@@ -142,6 +142,25 @@ private slots:
         for (int i = 0; i < 5; ++i) QCOMPARE(cells[i].kind, CellKind::Downloaded);
         for (int i = 5; i < 10; ++i) QCOMPARE(cells[i].kind, CellKind::Error);
     }
+    void grid_straddling_boundary_all_downloaded() {
+        // Segment boundary at 500 misaligned with 7 cells (~142 bytes each):
+        // cell 3 spans [428,571), crossing the boundary. Pre-fix it stayed
+        // Pending (owner-of-start test could never reach cellEnd). Uses Queued
+        // to exercise the range logic, NOT the Completed short-circuit.
+        auto s = segs2(1000);
+        s[0].current = 500;    // seg0 [0..499] complete
+        s[1].current = 1000;   // seg1 [500..999] complete
+        auto cells = computeCells(1000, s, DownloadState::Queued, 7);
+        QCOMPARE(cells.size(), 7);
+        for (const auto& c : cells) QCOMPARE(c.kind, CellKind::Downloaded);
+    }
+    void grid_completed_fills_all_even_misaligned() {
+        // Completed short-circuit must fill every cell even when boundaries
+        // don't align to cell edges.
+        auto s = segs2(1000); s[0].current = 500; s[1].current = 1000;
+        auto cells = computeCells(1000, s, DownloadState::Completed, 7);
+        for (const auto& c : cells) QCOMPARE(c.kind, CellKind::Downloaded);
+    }
     void grid_unknown_total_all_pending() {
         auto cells = computeCells(-1, {}, DownloadState::Downloading, 6);
         QCOMPARE(cells.size(), 6);
