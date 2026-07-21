@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/rootless-dev/orbit-downloader-tribute/compare/orbit-downloader-tribute-v0.2.0...orbit-downloader-tribute-v0.3.0) (2026-07-21)
+
+
+### Features
+
+* **extension:** intercept downloads at the network layer ([900cb06](https://github.com/rootless-dev/orbit-downloader-tribute/commit/900cb06c60ac4617e950d6d6dc670f6218ce0c84))
+* **gui:** background/tray mode with opt-in start-at-login ([8fb9970](https://github.com/rootless-dev/orbit-downloader-tribute/commit/8fb9970c6707675ad34705a6953b32a681bd4bcb))
+
 ## [0.2.0](https://github.com/rootless-dev/orbit-downloader-tribute/compare/orbit-downloader-tribute-v0.1.1...orbit-downloader-tribute-v0.2.0) (2026-07-20)
 
 
