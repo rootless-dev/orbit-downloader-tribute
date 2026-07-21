@@ -14,6 +14,7 @@ class ProgressGridWidget;
 class ClipboardWatcher;
 class Logger;
 class BrowserBridge;
+class AutostartService;
 class QTableView;
 class QPlainTextEdit;
 class QFormLayout;
@@ -24,6 +25,7 @@ class QActionGroup;
 class QTimer;
 class QModelIndex;
 class QSystemTrayIcon;
+class QCloseEvent;
 enum class DownloadState;
 
 class MainWindow : public QMainWindow {
@@ -49,6 +51,10 @@ public:
     }
     void          applyBrowserBridgeForTest(const BrowserPrefs& b) { applyBrowserBridge(b); }
     bool          bridgeListeningForTest() const;
+    bool          trayIconNullForTest() const;   // tray precisa de ícone visível (não-nulo)
+    void setAutostartService(AutostartService* s) { m_autostart = s; }
+    void showAndRaise();
+    void applyPreferencesResultForTest(const AppSettings& r) { applyPreferencesResult(r); }
     QUuid beginBackgroundLinkForTest(const QUrl& url, const HeaderList& h) {
         return beginBackgroundLink(url, h);
     }
@@ -57,9 +63,11 @@ public:
         reconcileReceivedLink(id, origUrl, h, accepted, chosenUrl, chosenDest);
     }
     void  setDialogOpenForTest(bool v) { m_dialogOpen = v; }
+    bool  closeToTrayHintShownForTest() const { return m_settings.ui.closeToTrayHintShown; }
 protected:
     void dragEnterEvent(QDragEnterEvent* e) override;
     void dropEvent(QDropEvent* e) override;
+    void closeEvent(QCloseEvent* e) override;
 private slots:
     void onNew();
     void onStart();
@@ -84,6 +92,7 @@ private slots:
 private:
     void    applySchedulerConfig(const SchedulerConfig& sc);
     void    applyBrowserBridge(const BrowserPrefs& b);
+    void    applyPreferencesResult(const AppSettings& r);
     QUuid   selectedId() const;
     QString defaultDir() const;
     void    addUrlViaDialog(const QUrl& prefill);
@@ -98,6 +107,7 @@ private:
     void    maybeQuitWhenDone();
     void    setClipboardMode(ClipboardMode m);
     void    clearCompleted();
+    void    quitApp();
     DownloadManager*     m_mgr;
     DownloadTableModel*  m_model;
     CategoryFilterProxy* m_proxy;
@@ -119,4 +129,5 @@ private:
     QSystemTrayIcon* m_tray = nullptr;
     QString          m_lastCompletedPath;   // último concluído: alvo do clique na notificação
     BrowserBridge*   m_bridge = nullptr;
+    AutostartService* m_autostart = nullptr;
 };

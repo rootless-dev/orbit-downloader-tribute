@@ -101,6 +101,24 @@ private slots:
         QCOMPARE(s.browser.port, quint16(8697));
         QVERIFY(s.browser.token.isEmpty());
     }
+    void uiFlagsRoundTrip() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("settings.json");
+        AppSettings s;
+        s.ui.startAtLogin = true;
+        s.ui.closeToTrayHintShown = true;
+        SettingsIo::save(path, s);
+        const AppSettings back = SettingsIo::load(path, EngineConfig{});
+        QCOMPARE(back.ui.startAtLogin, true);
+        QCOMPARE(back.ui.closeToTrayHintShown, true);
+    }
+    void uiFlagsDefaultFalseWhenAbsent() {
+        // A settings blob with a "ui" object lacking the new keys -> defaults false.
+        const QJsonObject root{{"ui", QJsonObject{{"theme", "dark"}}}};
+        const AppSettings s = SettingsIo::fromJson(root, EngineConfig{});
+        QCOMPARE(s.ui.startAtLogin, false);
+        QCOMPARE(s.ui.closeToTrayHintShown, false);
+    }
 };
 
 QTEST_MAIN(TstSettings)

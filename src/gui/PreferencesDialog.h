@@ -17,6 +17,7 @@ public:
     void setMaxKBpsForTest(int kbps);
     void setUserAgentCustomForTest(const QString& ua);
     void setBrowserEnabledForTest(bool on);
+    void setStartAtLoginForTest(bool on);
 
 private:
     AppSettings m_base;                 // preserva campos não editados (timeouts avançados etc.)
@@ -30,6 +31,7 @@ private:
     QComboBox* m_clipMode   = nullptr;
     QComboBox* m_uaPreset   = nullptr;
     QLineEdit* m_uaCustom   = nullptr;
+    QCheckBox* m_startAtLogin = nullptr;
     // Advanced
     QSpinBox*  m_connectMs  = nullptr;
     QSpinBox*  m_idleMs     = nullptr;

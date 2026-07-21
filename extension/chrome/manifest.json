@@ -4,7 +4,7 @@
   "version": "1.0",
   "description": "Send browser downloads to the Orbit Downloader Tribute app.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtCNDK1RzNJ7rOyPPIP9lh1M5qgy5LkrNyfF2ljfc5Re3vVuUxCmGZXCZrHi5ZuktSrvMjCYMvVIZ68aXJxxBNW1P/fhv3Kg+xfzfAHeeYF86arcIO7GMvSErue9RALSo8GPH5I1vDSqCzMJe0hsaMM3R7yqb4yQb0sbFPr0CMUlSc/bFwsMrk6voD5nWaGC2AULmDaPx0vlx8tTN08kT9MfABElW8U769gHD1jXuilGVWpnjAx6qZxOn9oAapak8ulk1wWhd0pZPIjnjAWoYMHq5PK3bk7WCfrTjQFjGEOeOvCT9w1kfPtO0f2OMNDB37VQICthd1TchyhrRUMpspQIDAQAB",
-  "permissions": ["downloads", "cookies", "notifications", "storage"],
+  "permissions": ["downloads", "cookies", "notifications", "storage", "webRequest"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "options_page": "options.html",

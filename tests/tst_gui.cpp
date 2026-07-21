@@ -1,4 +1,6 @@
 #include <QtTest>
+#include <QApplication>
+#include <QCloseEvent>
 #include <QFormLayout>
 
 // Ver tst_download.cpp / issue #1: testes que observam um download no estado
@@ -29,6 +31,7 @@
 #include "SchedulerDialog.h"
 #include "ContextMenuRules.h"
 #include "Theme.h"
+#include "AutostartService.h"
 #include "TestServer.h"
 #include <QAction>
 #include <QLabel>
@@ -68,6 +71,13 @@ static QString makeTempDir() {
     keep.push_back(d);
     return d->path();
 }
+
+class FakeAutostart : public AutostartService {
+public:
+    bool enabled = false;
+    bool isEnabled() const override { return enabled; }
+    bool setEnabled(bool on) override { enabled = on; return true; }
+};
 static QByteArray readFile(const QString& path) {
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) return QByteArray();
@@ -905,6 +915,16 @@ private slots:
         QVERIFY(dlg.result().ui.theme == ThemePref::Dark);
     }
 
+    // --- Task 6: "Start Orbit at login" checkbox ----------------------------
+
+    void preferencesStartAtLoginRoundTrips() {
+        AppSettings base;
+        base.ui.startAtLogin = false;
+        PreferencesDialog dlg(base);         // parent omitted: dialog owns itself for the test
+        dlg.setStartAtLoginForTest(true);
+        QCOMPARE(dlg.result().ui.startAtLogin, true);
+    }
+
     // --- Task 14 (Fase 4): SchedulerDialog ----------------------------------
 
     void scheduler_dialog_result_reflects_widgets() {
@@ -1056,6 +1076,37 @@ private slots:
         QVERIFY(titles.contains("View"));
         QVERIFY(titles.contains("Tools"));
         QVERIFY(titles.contains("Help"));
+    }
+
+    // --- Task 5 (SDD): close hides to tray instead of quitting -------------
+
+    void closeHidesToTrayAndDoesNotQuit() {
+        QTemporaryDir dir;
+        EngineConfig cfg; DownloadManager mgr(cfg, dir.path());
+        DownloadTableModel model(&mgr);
+        Logger logger(dir.path());
+        MainWindow w(&mgr, &model, &logger);
+        w.applySettings(AppSettings{}, dir.filePath("settings.json"));
+        w.show();
+        QVERIFY(w.isVisible());
+        QCloseEvent ev;
+        QApplication::sendEvent(&w, &ev);
+        QVERIFY(!ev.isAccepted());          // closeEvent ignored the event
+        QVERIFY(!w.isVisible());            // hidden, not destroyed
+        QVERIFY(w.closeToTrayHintShownForTest());  // one-time hint flag set
+    }
+
+    // A bandeja é o ÚNICO caminho de volta depois do close-to-tray, então o
+    // ícone precisa ser visível. qApp->windowIcon() é nulo por padrão (nada o
+    // define nos testes), logo o tray precisa cair num fallback não-nulo.
+    void trayIconIsNeverNull() {
+        QTemporaryDir dir;
+        EngineConfig cfg; DownloadManager mgr(cfg, dir.path());
+        DownloadTableModel model(&mgr);
+        Logger logger(dir.path());
+        MainWindow w(&mgr, &model, &logger);
+        w.applySettings(AppSettings{}, dir.filePath("settings.json"));
+        QVERIFY(!w.trayIconNullForTest());   // ícone visível na bandeja
     }
 
     // --- Task 11 (Fase 4): regras de habilitação do menu de contexto -------
@@ -1247,6 +1298,25 @@ private slots:
         QCOMPARE(c.error,      QColor("#ef4444"));
         QVERIFY(c.background.isValid());
         QVERIFY(c.pending.isValid());
+    }
+
+    // --- Task 7: apply autostart on Preferences OK -----------------------------
+
+    void preferencesAppliesAutostart() {
+        QTemporaryDir dir;
+        EngineConfig cfg; DownloadManager mgr(cfg, dir.path());
+        DownloadTableModel model(&mgr);
+        Logger logger(dir.path());
+        MainWindow w(&mgr, &model, &logger);
+        w.applySettings(AppSettings{}, dir.filePath("settings.json"));
+        FakeAutostart fake;
+        w.setAutostartService(&fake);
+        // Drive the apply-on-OK body directly (no modal exec): startAtLogin flips false->true.
+        AppSettings next;              // defaults + our change
+        next.ui.startAtLogin = true;
+        w.applyPreferencesResultForTest(next);
+        QVERIFY(fake.enabled);         // service was toggled on
+        QVERIFY(fake.isEnabled());
     }
 };
 
