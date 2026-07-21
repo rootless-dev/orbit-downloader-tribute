@@ -17,11 +17,13 @@
 #include "BrowserBridge.h"
 #include "BrowserBridgeProtocol.h"   // kExtensionOrigin
 #include "Theme.h"
+#include "AutostartService.h"
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QCloseEvent>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -33,6 +35,8 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
+#include <QIcon>
+#include <QStyle>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
@@ -154,8 +158,28 @@ MainWindow::MainWindow(DownloadManager* mgr, DownloadTableModel* model,
     // visível (ex.: plataforma "offscreen" dos testes) — show()/showMessage()
     // são no-ops nesse caso, sem crashar.
     m_tray = new QSystemTrayIcon(this);
-    m_tray->setIcon(qApp->windowIcon());
+    // A bandeja é o único caminho de volta após o close-to-tray, então o ícone
+    // NÃO pode ser nulo: qApp->windowIcon() é vazio se main_gui não o definir
+    // (ou nos testes). Sem ícone, o macOS não mostra o item na barra de menus
+    // ("QSystemTrayIcon::setVisible: No Icon set"). Cai num ícone padrão do
+    // estilo como garantia de visibilidade.
+    QIcon trayIcon = qApp->windowIcon();
+    if (trayIcon.isNull())
+        trayIcon = style()->standardIcon(QStyle::SP_ComputerIcon);
+    m_tray->setIcon(trayIcon);
+    auto* trayMenu = new QMenu(this);
+    QAction* aShow = trayMenu->addAction(tr("Show Orbit"));
+    connect(aShow, &QAction::triggered, this, &MainWindow::showAndRaise);
+    trayMenu->addSeparator();
+    QAction* aTrayQuit = trayMenu->addAction(tr("Quit"));
+    connect(aTrayQuit, &QAction::triggered, this, &MainWindow::quitApp);
+    m_tray->setContextMenu(trayMenu);
     m_tray->show();
+    connect(m_tray, &QSystemTrayIcon::activated, this,
+            [this](QSystemTrayIcon::ActivationReason r) {
+        if (r == QSystemTrayIcon::Trigger || r == QSystemTrayIcon::DoubleClick)
+            showAndRaise();
+    });
     connect(m_tray, &QSystemTrayIcon::messageClicked, this, [this]{
         if (!m_lastCompletedPath.isEmpty())
             QDesktopServices::openUrl(QUrl::fromLocalFile(m_lastCompletedPath));
@@ -181,7 +205,7 @@ MainWindow::MainWindow(DownloadManager* mgr, DownloadTableModel* model,
     QAction* aQuit = file->addAction(tr("Quit"));
     aQuit->setShortcut(QKeySequence::Quit);
     aQuit->setMenuRole(QAction::QuitRole);        // -> menu do app no macOS
-    connect(aQuit, &QAction::triggered, this, []{ qApp->quit(); });
+    connect(aQuit, &QAction::triggered, this, &MainWindow::quitApp);
 
     // Edit
     QMenu* edit = mb->addMenu(tr("&Edit"));
@@ -645,6 +669,10 @@ bool MainWindow::bridgeListeningForTest() const {
     return m_bridge && m_bridge->listening();
 }
 
+bool MainWindow::trayIconNullForTest() const {
+    return !m_tray || m_tray->icon().isNull();
+}
+
 // Centraliza a aplicação da config do scheduler: guarda em m_settings, arma o
 // Scheduler (setConfig re-arma o estado de disparo — Task 15), garante o timer
 // de 30s (criado uma única vez) e faz um tick imediato para que uma janela já
@@ -690,10 +718,41 @@ void MainWindow::maybeQuitWhenDone() {
     qApp->quit();
 }
 
+// Fechar a janela (X) não encerra o app: minimiza para a bandeja, mantendo
+// engine/bridge vivos. Mostra um balão avisando disso uma única vez.
+void MainWindow::closeEvent(QCloseEvent* e) {
+    e->ignore();      // don't quit; hide to tray and keep the engine/bridge alive
+    hide();
+    if (!m_settings.ui.closeToTrayHintShown) {
+        if (m_tray)
+            m_tray->showMessage(tr("Orbit"),
+                tr("Orbit is still running in the tray. Use the tray icon to reopen or quit."),
+                QSystemTrayIcon::Information, 5000);
+        m_settings.ui.closeToTrayHintShown = true;
+        if (!m_settingsPath.isEmpty()) SettingsIo::save(m_settingsPath, m_settings);
+    }
+}
+
+void MainWindow::showAndRaise() {
+    showNormal();
+    raise();
+    activateWindow();
+}
+
+void MainWindow::quitApp() {
+    qApp->quit();
+}
+
 void MainWindow::onPreferences() {
     PreferencesDialog dlg(m_settings, this);
     if (dlg.exec() != QDialog::Accepted) return;
-    m_settings = dlg.result();
+    applyPreferencesResult(dlg.result());
+}
+
+void MainWindow::applyPreferencesResult(const AppSettings& r) {
+    const bool wantAutostart = r.ui.startAtLogin;
+    const bool hadAutostart  = m_settings.ui.startAtLogin;
+    m_settings = r;
     applyTheme(m_settings.ui.theme);              // aplica o tema ao vivo (onPreferences não passa por applySettings)
     m_mgr->setConfig(m_settings.engine);
     applyBrowserBridge(m_settings.browser);
@@ -703,6 +762,16 @@ void MainWindow::onPreferences() {
             if (a->data().toInt() == int(m_settings.ui.clipboardMode)) { a->setChecked(true); break; }
     }
     if (!m_settings.ui.defaultDownloadDir.isEmpty()) m_lastDir = m_settings.ui.defaultDownloadDir;
+
+    if (m_autostart && wantAutostart != hadAutostart) {
+        if (!m_autostart->setEnabled(wantAutostart)) {
+            m_settings.ui.startAtLogin = hadAutostart;   // revert on failure
+            if (m_tray)
+                m_tray->showMessage(tr("Orbit"),
+                    tr("Could not change the login item."),
+                    QSystemTrayIcon::Warning, 5000);
+        }
+    }
     if (!m_settingsPath.isEmpty()) SettingsIo::save(m_settingsPath, m_settings);
 }
 

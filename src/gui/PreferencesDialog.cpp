@@ -81,6 +81,9 @@ PreferencesDialog::PreferencesDialog(const AppSettings& current, QWidget* parent
     gf->addRow(tr("Clipboard monitor:"),      m_clipMode);
     gf->addRow(tr("User-Agent:"),             m_uaPreset);
     gf->addRow(QString(),                     m_uaCustom);
+    m_startAtLogin = new QCheckBox(tr("Start Orbit at login"), gen);
+    m_startAtLogin->setChecked(current.ui.startAtLogin);
+    gf->addRow(QString(), m_startAtLogin);
     tabs->addTab(gen, tr("General"));
 
     // ---- Advanced ----
@@ -172,6 +175,7 @@ AppSettings PreferencesDialog::result() const {
     s.ui.defaultDownloadDir = m_dir->text();
     s.ui.clipboardMode = ClipboardMode(m_clipMode->currentData().toInt());
     s.ui.theme = ThemePref(m_theme->currentData().toInt());
+    s.ui.startAtLogin = m_startAtLogin->isChecked();
     s.browser.enabled = m_brEnabled->isChecked();
     s.browser.port    = quint16(m_brPort->value());
     s.browser.token   = m_brTokenValue;
@@ -192,3 +196,5 @@ void PreferencesDialog::setBrowserEnabledForTest(bool on) {
         m_brToken->setText(m_brTokenValue);
     }
 }
+
+void PreferencesDialog::setStartAtLoginForTest(bool on) { m_startAtLogin->setChecked(on); }

@@ -43,6 +43,8 @@ AppSettings fromJson(const QJsonObject& root, const EngineConfig& defaults) {
     s.ui.defaultDownloadDir = ui.value("defaultDownloadDir").toString();
     s.ui.clipboardMode      = clipFromStr(ui.value("clipboardMode").toString());
     s.ui.theme              = themeFromStr(ui.value("theme").toString());
+    s.ui.startAtLogin        = ui.value("startAtLogin").toBool(false);
+    s.ui.closeToTrayHintShown = ui.value("closeToTrayHintShown").toBool(false);
 
     const QJsonObject sc = root.value("scheduler").toObject();
     s.scheduler.enabled      = sc.value("enabled").toBool(false);
@@ -66,7 +68,9 @@ QJsonObject toJson(const AppSettings& s, const QJsonObject& prev) {
     root["ui"]       = QJsonObject{
         {"defaultDownloadDir", s.ui.defaultDownloadDir},
         {"clipboardMode",      clipToStr(s.ui.clipboardMode)},
-        {"theme",              themeToStr(s.ui.theme)}};
+        {"theme",              themeToStr(s.ui.theme)},
+        {"startAtLogin",       s.ui.startAtLogin},
+        {"closeToTrayHintShown", s.ui.closeToTrayHintShown}};
     root["scheduler"] = QJsonObject{
         {"enabled",      s.scheduler.enabled},
         {"startTime",    s.scheduler.start.toString("HH:mm")},

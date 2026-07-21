@@ -19,6 +19,8 @@ struct UiPrefs {
     QString       defaultDownloadDir;                 // vazio => boot resolve p/ Downloads
     ClipboardMode clipboardMode = ClipboardMode::Off;
     ThemePref     theme         = ThemePref::System;
+    bool          startAtLogin        = false;        // intent: launch hidden at login
+    bool          closeToTrayHintShown = false;       // one-time "still running in tray" balloon
 };
 
 struct SchedulerConfig {

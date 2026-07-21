@@ -5,6 +5,9 @@ add_library(orbitgui_logic STATIC
     GridGeometry.cpp
     SpeedSampler.cpp
     DropTargets.cpp
+    BootOptions.cpp
+    SingleInstanceGuard.cpp
+    AutostartService.cpp
     Settings.cpp
     Scheduler.cpp
     BrowserBridgeProtocol.cpp
