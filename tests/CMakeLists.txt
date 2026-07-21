@@ -50,3 +50,15 @@ add_test(NAME tst_logger COMMAND tst_logger)
 add_executable(tst_browserbridge tst_browserbridge.cpp)
 target_link_libraries(tst_browserbridge PRIVATE orbitgui_logic Qt6::Test Qt6::Network)
 add_test(NAME tst_browserbridge COMMAND tst_browserbridge)
+
+add_executable(tst_bootoptions tst_bootoptions.cpp)
+target_link_libraries(tst_bootoptions PRIVATE orbitgui_logic Qt6::Test)
+add_test(NAME tst_bootoptions COMMAND tst_bootoptions)
+
+add_executable(tst_singleinstance tst_singleinstance.cpp)
+target_link_libraries(tst_singleinstance PRIVATE orbitgui_logic Qt6::Test Qt6::Network)
+add_test(NAME tst_singleinstance COMMAND tst_singleinstance)
+
+add_executable(tst_autostart tst_autostart.cpp)
+target_link_libraries(tst_autostart PRIVATE orbitgui_logic Qt6::Test)
+add_test(NAME tst_autostart COMMAND tst_autostart)
