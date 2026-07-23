@@ -2,6 +2,10 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QFormLayout>
+#include <QListWidget>
+#include <QStackedWidget>
+#include <QDialogButtonBox>
+#include <QAbstractButton>
 
 // Ver tst_download.cpp / issue #1: testes que observam um download no estado
 // Downloading no meio da transferência são flaky em hardware rápido (CI). Rodam
@@ -28,7 +32,6 @@
 #include "ClipboardWatcher.h"
 #include "CredentialsDialog.h"
 #include "PreferencesDialog.h"
-#include "SchedulerDialog.h"
 #include "ContextMenuRules.h"
 #include "Theme.h"
 #include "AutostartService.h"
@@ -925,22 +928,61 @@ private slots:
         QCOMPARE(dlg.result().ui.startAtLogin, true);
     }
 
-    // --- Task 14 (Fase 4): SchedulerDialog ----------------------------------
+    // --- Preferences sidebar redesign --------------------------------------
 
-    void scheduler_dialog_result_reflects_widgets() {
-        SchedulerConfig in;                 // defaults: disabled, 08:00-18:00, Daily
-        SchedulerDialog dlg(in);
-        dlg.setEnabledForTest(true);
-        dlg.setStartForTest(QTime(9, 15));
-        dlg.setStopForTest(QTime(23, 45));
-        dlg.setRecurrenceForTest(Recurrence::Once);
-        dlg.setQuitWhenDoneForTest(true);
-        const SchedulerConfig out = dlg.result();
-        QVERIFY(out.enabled);
-        QCOMPARE(out.start, QTime(9, 15));
-        QCOMPARE(out.stop, QTime(23, 45));
-        QVERIFY(out.recurrence == Recurrence::Once);
-        QVERIFY(out.quitWhenDone);
+    void preferences_has_ten_category_rows_synced_to_stack() {
+        AppSettings in;
+        PreferencesDialog dlg(in);
+        auto* list = dlg.findChild<QListWidget*>();
+        auto* stack = dlg.findChild<QStackedWidget*>();
+        QVERIFY(list);
+        QVERIFY(stack);
+        QCOMPARE(list->count(), 10);
+        QCOMPARE(stack->count(), 10);
+        list->setCurrentRow(6);                 // Scheduler
+        QCOMPARE(stack->currentIndex(), 6);
+    }
+
+    void preferences_result_reflects_scheduler_widgets() {
+        AppSettings in;                          // scheduler defaults: disabled, 08:00-18:00, Daily
+        PreferencesDialog dlg(in);
+        dlg.setSchedulerEnabledForTest(true);
+        dlg.setSchedulerStartForTest(QTime(9, 15));
+        dlg.setSchedulerStopForTest(QTime(23, 45));
+        dlg.setSchedulerRecurrenceForTest(Recurrence::Once);
+        dlg.setSchedulerQuitForTest(true);
+        const AppSettings out = dlg.result();
+        QVERIFY(out.scheduler.enabled);
+        QCOMPARE(out.scheduler.start, QTime(9, 15));
+        QCOMPARE(out.scheduler.stop, QTime(23, 45));
+        QVERIFY(out.scheduler.recurrence == Recurrence::Once);
+        QVERIFY(out.scheduler.quitWhenDone);
+    }
+
+    void preferences_setInitialCategory_selects_page() {
+        AppSettings in;
+        PreferencesDialog dlg(in);
+        dlg.setInitialCategory(PreferencesDialog::Category::Scheduler);
+        auto* stack = dlg.findChild<QStackedWidget*>();
+        QVERIFY(stack);
+        QCOMPARE(stack->currentIndex(), 6);   // Scheduler == index 6
+    }
+
+    void preferences_restore_defaults_resets_widgets() {
+        AppSettings in;
+        in.engine.maxConcurrentDownloads = 9;
+        PreferencesDialog dlg(in);
+        dlg.setConcurrentForTest(3);                 // diverge from defaults
+        auto* box = dlg.findChild<QDialogButtonBox*>();
+        QVERIFY(box);
+        QAbstractButton* reset = nullptr;
+        for (QAbstractButton* b : box->buttons())
+            if (box->buttonRole(b) == QDialogButtonBox::ResetRole) { reset = b; break; }
+        QVERIFY(reset);
+        reset->click();
+        // AppSettings{} default for maxConcurrentDownloads
+        QCOMPARE(dlg.result().engine.maxConcurrentDownloads,
+                 AppSettings{}.engine.maxConcurrentDownloads);
     }
 
     // --- Task 9 (Fase 4): aba Log acompanha o download selecionado --------
