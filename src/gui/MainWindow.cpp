@@ -10,7 +10,6 @@
 #include "ClipboardWatcher.h"
 #include "CredentialsDialog.h"
 #include "PreferencesDialog.h"
-#include "SchedulerDialog.h"
 #include "UrlName.h"
 #include "Logger.h"
 #include "ContextMenuRules.h"
@@ -693,10 +692,10 @@ void MainWindow::applySchedulerConfig(const SchedulerConfig& sc) {
 }
 
 void MainWindow::onScheduler() {
-    SchedulerDialog dlg(m_settings.scheduler, this);
+    PreferencesDialog dlg(m_settings, this);
+    dlg.setInitialCategory(PreferencesDialog::Category::Scheduler);
     if (dlg.exec() != QDialog::Accepted) return;
-    applySchedulerConfig(dlg.result());
-    if (!m_settingsPath.isEmpty()) SettingsIo::save(m_settingsPath, m_settings);
+    applyPreferencesResult(dlg.result());
 }
 
 void MainWindow::applySchedulerConfigForTest(const SchedulerConfig& sc) {
@@ -752,10 +751,13 @@ void MainWindow::onPreferences() {
 void MainWindow::applyPreferencesResult(const AppSettings& r) {
     const bool wantAutostart = r.ui.startAtLogin;
     const bool hadAutostart  = m_settings.ui.startAtLogin;
+    const bool scheduleChanged = !(m_settings.scheduler == r.scheduler);
     m_settings = r;
     applyTheme(m_settings.ui.theme);              // aplica o tema ao vivo (onPreferences não passa por applySettings)
     m_mgr->setConfig(m_settings.engine);
     applyBrowserBridge(m_settings.browser);
+    if (scheduleChanged)                          // só re-arma (e dá o tick imediato) se o agendamento mudou
+        applySchedulerConfig(m_settings.scheduler);
     m_clip->setMode(m_settings.ui.clipboardMode);
     if (m_clipGroup) {
         for (QAction* a : m_clipGroup->actions())

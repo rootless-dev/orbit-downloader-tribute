@@ -29,6 +29,7 @@ struct SchedulerConfig {
     QTime      stop         = QTime(18, 0);
     Recurrence recurrence   = Recurrence::Daily;
     bool       quitWhenDone = false;
+    bool operator==(const SchedulerConfig&) const = default;
 };
 
 struct AppSettings {

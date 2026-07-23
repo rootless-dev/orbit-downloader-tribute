@@ -27,7 +27,6 @@ add_library(orbitgui STATIC
     ClipboardWatcher.cpp
     CredentialsDialog.cpp
     PreferencesDialog.cpp
-    SchedulerDialog.cpp
     MainWindow.cpp
 )
 target_link_libraries(orbitgui PUBLIC orbitgui_logic orbitcore Qt6::Widgets Qt6::Core)
