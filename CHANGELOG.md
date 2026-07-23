@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/rootless-dev/orbit-downloader-tribute/compare/orbit-downloader-tribute-v0.3.0...orbit-downloader-tribute-v0.4.0) (2026-07-23)
+
+
+### Features
+
+* **gui:** replace placeholder app icon with orbit artwork ([a70892a](https://github.com/rootless-dev/orbit-downloader-tribute/commit/a70892a9e475768f8bf9bb735baa9c730eca2281))
+
 ## [0.3.0](https://github.com/rootless-dev/orbit-downloader-tribute/compare/orbit-downloader-tribute-v0.2.0...orbit-downloader-tribute-v0.3.0) (2026-07-21)
 
 
