@@ -1,5 +1,6 @@
 add_library(orbitcore STATIC
   DownloadTypes.h
+  AbstractTask.h
   Transport.h
   Segmentation.cpp
   ContentDisposition.cpp
@@ -17,6 +18,15 @@ add_library(orbitcore STATIC
   EngineConfigJson.cpp
   RateLimiter.cpp
   Logger.cpp
+  torrent/Bencode.cpp
+  torrent/TorrentMetainfo.cpp
+  torrent/Bitfield.cpp
+  torrent/PieceStore.cpp
+  torrent/PiecePicker.cpp
+  torrent/HttpTrackerClient.cpp
+  torrent/PeerWire.cpp
+  torrent/PeerConnection.cpp
+  torrent/TorrentTask.cpp
 )
 set_target_properties(orbitcore PROPERTIES LINKER_LANGUAGE CXX)
 target_include_directories(orbitcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

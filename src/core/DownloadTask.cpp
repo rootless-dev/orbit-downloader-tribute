@@ -7,7 +7,19 @@
 
 DownloadTask::DownloadTask(Transport* transport, const EngineConfig& cfg,
                            RateLimiter* limiter, QObject* parent)
-    : QObject(parent), m_transport(transport), m_cfg(cfg), m_limiter(limiter) {}
+    : AbstractTask(parent), m_transport(transport), m_cfg(cfg), m_limiter(limiter) {}
+
+// AbstractTask::kind(): HTTP vs FTP is derived from the task's own URL scheme
+// (there's no separate transport-kind accessor) - "ftp" -> Ftp, anything else
+// (http/https today) -> Http.
+AbstractTask::Kind DownloadTask::kind() const {
+    return m_url.scheme().compare(QLatin1String("ftp"), Qt::CaseInsensitive) == 0
+               ? Kind::Ftp : Kind::Http;
+}
+
+QString DownloadTask::displayName() const {
+    return QFileInfo(m_destPath).fileName();
+}
 
 void DownloadTask::init(const QUuid& id, const QUrl& url, const QString& destPath, int segmentCount,
                         const HeaderList& extraHeaders, bool provisionalName) {

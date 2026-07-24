@@ -12,6 +12,7 @@ add_library(orbitgui_logic STATIC
     Scheduler.cpp
     BrowserBridgeProtocol.cpp
     BrowserBridge.cpp
+    TorrentSelection.cpp
 )
 target_link_libraries(orbitgui_logic PUBLIC orbitcore Qt6::Core Qt6::Network)
 target_include_directories(orbitgui_logic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -28,6 +29,7 @@ add_library(orbitgui STATIC
     CredentialsDialog.cpp
     PreferencesDialog.cpp
     MainWindow.cpp
+    TorrentOpenDialog.cpp
 )
 target_link_libraries(orbitgui PUBLIC orbitgui_logic orbitcore Qt6::Widgets Qt6::Core)
 target_include_directories(orbitgui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

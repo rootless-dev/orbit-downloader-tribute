@@ -211,6 +211,25 @@ PreferencesDialog::PreferencesDialog(const AppSettings& current, QWidget* parent
         m_stack->addWidget(makeSectionPage(tr("Scheduler"), f, this));
     }
 
+    // ---- BitTorrent ----
+    {
+        m_btMaxPeers = new QSpinBox; m_btMaxPeers->setRange(1, 500);
+        m_btVerify = new QComboBox;
+        m_btVerify->addItem(tr("Trust bitfield"), int(ResumeVerifyMode::TrustBitfield));
+        m_btVerify->addItem(tr("Re-check on open"), int(ResumeVerifyMode::RecheckOnOpen));
+        m_btStrategy = new QComboBox;
+        m_btStrategy->addItem(tr("Rarest-first"), int(PieceStrategy::RarestFirst));
+        m_btStrategy->addItem(tr("Sequential"),   int(PieceStrategy::Sequential));
+        m_btListenPort = new QSpinBox; m_btListenPort->setRange(1, 65535);
+        auto* f = new QFormLayout;
+        f->addRow(tr("Max peers per torrent:"), m_btMaxPeers);
+        f->addRow(tr("Resume verification:"),   m_btVerify);
+        f->addRow(tr("Default piece strategy:"), m_btStrategy);
+        f->addRow(tr("Listen port:"),            m_btListenPort);
+        m_categoryList->addItem(tr("BitTorrent"));
+        m_stack->addWidget(makeSectionPage(tr("BitTorrent"), f, this));
+    }
+
     // ---- Placeholders ----
     m_categoryList->addItem(tr("P2P Network"));
     m_stack->addWidget(makePlaceholderPage(tr("P2P Network"), this));
@@ -281,6 +300,10 @@ void PreferencesDialog::loadFromSettings(const AppSettings& s) {
     m_schedStop->setTime(s.scheduler.stop);
     m_schedRecurrence->setCurrentIndex(m_schedRecurrence->findData(int(s.scheduler.recurrence)));
     m_schedQuit->setChecked(s.scheduler.quitWhenDone);
+    m_btMaxPeers->setValue(s.bittorrent.maxPeersPerTorrent);
+    m_btVerify->setCurrentIndex(m_btVerify->findData(int(s.bittorrent.verify)));
+    m_btStrategy->setCurrentIndex(m_btStrategy->findData(int(s.bittorrent.defaultStrategy)));
+    m_btListenPort->setValue(s.bittorrent.listenPort);
 }
 
 AppSettings PreferencesDialog::result() const {
@@ -308,6 +331,10 @@ AppSettings PreferencesDialog::result() const {
     s.scheduler.stop         = m_schedStop->time();
     s.scheduler.recurrence   = Recurrence(m_schedRecurrence->currentData().toInt());
     s.scheduler.quitWhenDone = m_schedQuit->isChecked();
+    s.bittorrent.maxPeersPerTorrent = m_btMaxPeers->value();
+    s.bittorrent.verify             = ResumeVerifyMode(m_btVerify->currentData().toInt());
+    s.bittorrent.defaultStrategy    = PieceStrategy(m_btStrategy->currentData().toInt());
+    s.bittorrent.listenPort         = quint16(m_btListenPort->value());
     return s;
 }
 
@@ -339,3 +366,12 @@ void PreferencesDialog::setSchedulerRecurrenceForTest(Recurrence r) {
     m_schedRecurrence->setCurrentIndex(m_schedRecurrence->findData(int(r)));
 }
 void PreferencesDialog::setSchedulerQuitForTest(bool on)    { m_schedQuit->setChecked(on); }
+
+void PreferencesDialog::setBtMaxPeersForTest(int n)         { m_btMaxPeers->setValue(n); }
+void PreferencesDialog::setBtListenPortForTest(quint16 p)   { m_btListenPort->setValue(p); }
+void PreferencesDialog::setBtVerifyForTest(ResumeVerifyMode m) {
+    m_btVerify->setCurrentIndex(m_btVerify->findData(int(m)));
+}
+void PreferencesDialog::setBtStrategyForTest(PieceStrategy s) {
+    m_btStrategy->setCurrentIndex(m_btStrategy->findData(int(s)));
+}

@@ -1,6 +1,7 @@
 #pragma once
 #include <QMainWindow>
 #include <QPoint>
+#include <QHash>
 #include <QString>
 #include <QUrl>
 #include <QUuid>
@@ -70,6 +71,7 @@ protected:
     void closeEvent(QCloseEvent* e) override;
 private slots:
     void onNew();
+    void onOpenTorrent();
     void onStart();
     void onPause();
     void onDelete();
@@ -96,6 +98,7 @@ private:
     QUuid   selectedId() const;
     QString defaultDir() const;
     void    addUrlViaDialog(const QUrl& prefill);
+    void    openTorrentFile(const QString& path);   // parse -> TorrentOpenDialog -> addTorrent
     void    enqueue(const QUrl& url, const QString& dir);
     QUuid beginBackgroundLink(const QUrl& url, const HeaderList& headers);
     void  receiveLink(const QUrl& url, const HeaderList& headers);
@@ -108,6 +111,7 @@ private:
     void    setClipboardMode(ClipboardMode m);
     void    clearCompleted();
     void    quitApp();
+    void    refreshProperties(); // (re)renders m_props for the selected row; also the ~2s live-refresh tick
     DownloadManager*     m_mgr;
     DownloadTableModel*  m_model;
     CategoryFilterProxy* m_proxy;
@@ -124,10 +128,12 @@ private:
     QActionGroup*         m_clipGroup = nullptr;   // p/ refletir o modo persistido no menu
     Scheduler             m_scheduler;
     QTimer*               m_schedTimer = nullptr;
+    QTimer*               m_propsRefreshTimer = nullptr; // ~2s: keep Properties live for the selected torrent
     Logger*  m_logger = nullptr;
     QUuid    m_logShownId;     // download cujo log está na aba
     QSystemTrayIcon* m_tray = nullptr;
     QString          m_lastCompletedPath;   // último concluído: alvo do clique na notificação
     BrowserBridge*   m_bridge = nullptr;
     AutostartService* m_autostart = nullptr;
+    QHash<QUuid, PieceStrategy> m_torrentStrategy;   // per-torrent choice this session (context menu)
 };

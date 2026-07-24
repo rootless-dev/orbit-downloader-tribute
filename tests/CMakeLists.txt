@@ -62,3 +62,39 @@ add_test(NAME tst_singleinstance COMMAND tst_singleinstance)
 add_executable(tst_autostart tst_autostart.cpp)
 target_link_libraries(tst_autostart PRIVATE orbitgui_logic Qt6::Test)
 add_test(NAME tst_autostart COMMAND tst_autostart)
+
+add_executable(tst_bencode tst_bencode.cpp)
+target_link_libraries(tst_bencode PRIVATE orbitcore Qt6::Test)
+add_test(NAME tst_bencode COMMAND tst_bencode)
+
+add_executable(tst_metainfo tst_metainfo.cpp)
+target_link_libraries(tst_metainfo PRIVATE orbitcore Qt6::Test)
+add_test(NAME tst_metainfo COMMAND tst_metainfo)
+
+add_executable(tst_bitfield tst_bitfield.cpp)
+target_link_libraries(tst_bitfield PRIVATE orbitcore Qt6::Test)
+add_test(NAME tst_bitfield COMMAND tst_bitfield)
+
+add_executable(tst_piecestore tst_piecestore.cpp)
+target_link_libraries(tst_piecestore PRIVATE orbitcore Qt6::Test)
+add_test(NAME tst_piecestore COMMAND tst_piecestore)
+
+add_executable(tst_piecepicker tst_piecepicker.cpp)
+target_link_libraries(tst_piecepicker PRIVATE orbitcore Qt6::Test)
+add_test(NAME tst_piecepicker COMMAND tst_piecepicker)
+
+add_executable(tst_tracker tst_tracker.cpp)
+target_link_libraries(tst_tracker PRIVATE orbitcore Qt6::Test Qt6::Network Qt6::HttpServer)
+add_test(NAME tst_tracker COMMAND tst_tracker)
+
+add_executable(tst_peerwire tst_peerwire.cpp)
+target_link_libraries(tst_peerwire PRIVATE orbitcore Qt6::Test Qt6::Network)
+add_test(NAME tst_peerwire COMMAND tst_peerwire)
+
+add_executable(tst_seeder tst_seeder.cpp TestSeeder.cpp)
+target_link_libraries(tst_seeder PRIVATE orbitcore Qt6::Test Qt6::Network)
+add_test(NAME tst_seeder COMMAND tst_seeder)
+
+add_executable(tst_torrent tst_torrent.cpp TestSeeder.cpp)
+target_link_libraries(tst_torrent PRIVATE orbitcore Qt6::Test Qt6::Network)
+add_test(NAME tst_torrent COMMAND tst_torrent)

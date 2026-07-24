@@ -1,5 +1,6 @@
 #pragma once
 #include "DownloadTypes.h"
+#include "AbstractTask.h"
 #include "Persistence.h"
 #include "Transport.h"
 #include <QObject>
@@ -10,7 +11,7 @@ class RateLimiter;
 class Logger;
 enum class LogLevel;
 
-class DownloadTask : public QObject {
+class DownloadTask : public AbstractTask {
     Q_OBJECT
 public:
     DownloadTask(Transport* transport, const EngineConfig& cfg,
@@ -19,25 +20,28 @@ public:
               const HeaderList& extraHeaders = {}, bool provisionalName = false);
     void restore(const DownloadRecord& rec, const QVector<Segment>& segs,
                  const QString& etag, const QString& lastModified, bool validated);
-    void start();
-    void pause();
-    void requeue();
-    void cancel();
+    void start() override;
+    void pause() override;
+    void requeue() override;
+    void cancel() override;
     void setDestPath(const QString& path);
     void clearProvisionalName();               // user confirmed the name; stop CD override
     bool provisionalName() const { return m_provisionalName; }
     void setCredentials(const Credentials& c);
-    DownloadState    state() const { return m_state; }
+    DownloadState    state() const override { return m_state; }
     QString          error() const { return m_error; }
-    QUuid            id() const { return m_id; }
+    QUuid            id() const override { return m_id; }
     DownloadRecord   record() const;
     QVector<Segment> segments() const;
-    Priority priority() const { return m_priority; }
-    void     setPriority(Priority p) { m_priority = p; }
+    Priority priority() const override { return m_priority; }
+    void     setPriority(Priority p) override { m_priority = p; }
     void     setLogger(Logger* l) { m_logger = l; }
+    // AbstractTask
+    Kind    kind() const override;
+    QString displayName() const override;
+    qint64  totalBytes() const override { return m_totalBytes; }
+    qint64  receivedBytes() const override;
 signals:
-    void progress(qint64 received, qint64 total);
-    void stateChanged(DownloadState state);
     void segmentProgress(int index, qint64 currentOffset);
     void credentialsRequired(const QUuid& id, const QString& host);
 private:
@@ -50,7 +54,6 @@ private:
     void onSegmentFailed(int index, const QString& error, FailureKind kind);
     void onRestartRequired(int index);
     void checkAllComplete();
-    qint64 receivedBytes() const;
     void emitProgressNow();
     void logLine(LogLevel level, const QString& msg);
 

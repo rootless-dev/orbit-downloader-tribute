@@ -20,6 +20,7 @@
 #include "DownloadTypes.h"
 #include "SpeedSampler.h"
 #include "DownloadManager.h"
+#include "AbstractTask.h"
 #include "DownloadTask.h"
 #include "DownloadTableModel.h"
 #include "CategoryFilterProxy.h"
@@ -32,6 +33,12 @@
 #include "ClipboardWatcher.h"
 #include "CredentialsDialog.h"
 #include "PreferencesDialog.h"
+#include "TorrentSelection.h"
+#include "TorrentOpenDialog.h"
+#include "torrent/TorrentMetainfo.h"
+#include "torrent/TorrentTask.h"
+#include "torrent/Bitfield.h"
+#include "RateLimiter.h"
 #include "ContextMenuRules.h"
 #include "Theme.h"
 #include "AutostartService.h"
@@ -46,11 +53,14 @@
 #include <QItemSelectionModel>
 #include <QTemporaryDir>
 #include <QFile>
+#include <QTreeWidget>
+#include <QComboBox>
 #include <QDeadlineTimer>
 #include <QSharedPointer>
 #include <QSignalSpy>
 #include <QSet>
 #include <QTcpServer>
+#include <QDataStream>
 
 static QVector<Segment> segs2(qint64 total) {
     // two contiguous halves, each fully pending (current==start)
@@ -75,6 +85,49 @@ static QString makeTempDir() {
     return d->path();
 }
 
+// --- Task 13: TorrentSelection / TorrentOpenDialog test helpers ---------
+
+// Path convention matches what TorrentMetainfo::parse actually produces
+// (see tst_metainfo.cpp's parsesMultiFileOffsets): plain relative paths,
+// NOT prefixed with the torrent name. "a.txt" sits at the root; "sub/b.txt"
+// is nested one folder deep.
+static TorrentMetainfo twoFileMeta() {
+    TorrentMetainfo m;
+    m.name = "root";
+    m.isMultiFile = true;
+    FileEntry a; a.path = "a.txt";     a.length = 100; a.offset = 0;
+    FileEntry b; b.path = "sub/b.txt"; b.length = 200; b.offset = 100;
+    m.files = {a, b};
+    m.totalLength = 300;
+    return m;
+}
+
+static TorrentMetainfo singleFileMeta() {
+    TorrentMetainfo m;
+    m.name = "solo.iso";
+    m.isMultiFile = false;
+    FileEntry f; f.path = "solo.iso"; f.length = 500; f.offset = 0;
+    m.files = {f};
+    m.totalLength = 500;
+    return m;
+}
+
+// Task 14: a single-file torrent with exactly 4 pieces, for the progress
+// grid's piece->cell mapping. The piece hashes are placeholders (the grid
+// never re-hashes; piece states come from the resume bitfield / task state).
+static TorrentMetainfo fourPieceMeta() {
+    TorrentMetainfo m;
+    m.name = "grid.bin";
+    m.isMultiFile = false;
+    m.pieceLength = 16384;
+    m.totalLength = 4 * 16384;
+    FileEntry f; f.path = "grid.bin"; f.length = m.totalLength; f.offset = 0;
+    m.files = {f};
+    for (int i = 0; i < 4; ++i) m.pieceHashes.append(QByteArray(20, char('a' + i)));
+    m.infoHash = QByteArray(20, 'Z');   // arbitrary-but-stable 20-byte info hash
+    return m;
+}
+
 class FakeAutostart : public AutostartService {
 public:
     bool enabled = false;
@@ -89,11 +142,11 @@ static QByteArray readFile(const QString& path) {
 static bool waitForState(DownloadManager& mgr, const QUuid& id, DownloadState want, int timeoutMs) {
     QDeadlineTimer dl(timeoutMs);
     while (!dl.hasExpired()) {
-        DownloadTask* t = mgr.taskById(id);
+        AbstractTask* t = mgr.taskById(id);
         if (t && t->state() == want) return true;
         QTest::qWait(20);
     }
-    DownloadTask* t = mgr.taskById(id);
+    AbstractTask* t = mgr.taskById(id);
     return t && t->state() == want;
 }
 
@@ -397,8 +450,8 @@ private slots:
         QString dir = makeTempDir();
         DownloadManager mgr(cfg, dir);
         QUuid id = mgr.addDownload(srv.url("/ranged"), dir + "/big.bin");
-        DownloadTask* t = mgr.taskById(id);
-        QSignalSpy prog(t, &DownloadTask::progress);
+        AbstractTask* t = mgr.taskById(id);
+        QSignalSpy prog(t, &AbstractTask::progress);
         QVERIFY(prog.wait(3000));
         mgr.pauseAll();
         QVERIFY(waitForState(mgr, id, DownloadState::Paused, 3000));
@@ -424,10 +477,10 @@ private slots:
         DownloadTableModel model(&mgr);
         QUuid id = mgr.addDownload(srv.url("/ranged"), dir + "/pause.bin");
         model.appendTask(mgr.taskById(id));
-        DownloadTask* t = mgr.taskById(id);
+        AbstractTask* t = mgr.taskById(id);
 
         QVERIFY(waitForState(mgr, id, DownloadState::Downloading, 5000));
-        QSignalSpy prog(t, &DownloadTask::progress);
+        QSignalSpy prog(t, &AbstractTask::progress);
         QVERIFY(prog.wait(3000));   // let the sampler accrue at least one real sample
 
         mgr.pauseAll();
@@ -546,8 +599,8 @@ private slots:
         model.appendTask(mgr.taskById(done));
         model.appendTask(mgr.taskById(slow));
 
-        DownloadTask* slowTask = mgr.taskById(slow);
-        QSignalSpy prog(slowTask, &DownloadTask::progress);
+        AbstractTask* slowTask = mgr.taskById(slow);
+        QSignalSpy prog(slowTask, &AbstractTask::progress);
         QVERIFY(prog.wait(3000));
         mgr.pause(slow);
         QVERIFY(waitForState(mgr, slow, DownloadState::Paused, 3000));
@@ -575,7 +628,7 @@ private slots:
         QUuid id = mgr.addDownload(srv.url("/ranged"), dir + "/o.bin");
         ProgressGridWidget w;
         w.resize(200, 80);
-        w.setTask(mgr.taskById(id));
+        w.setTask(qobject_cast<DownloadTask*>(mgr.taskById(id)));
         w.setTask(nullptr);         // switching away must disconnect cleanly
         QVERIFY(true);
     }
@@ -593,7 +646,7 @@ private slots:
         QUuid id = mgr.addDownload(srv.url("/ranged"), dir + "/g.bin");
         ProgressGridWidget w;
         w.resize(200, 80);
-        w.setTask(mgr.taskById(id));
+        w.setTask(qobject_cast<DownloadTask*>(mgr.taskById(id)));
 
         QVERIFY(waitForState(mgr, id, DownloadState::Completed, 10000));
         QTest::qWait(150);   // let the throttled scheduleRepaint() timer fire
@@ -937,8 +990,10 @@ private slots:
         auto* stack = dlg.findChild<QStackedWidget*>();
         QVERIFY(list);
         QVERIFY(stack);
-        QCOMPARE(list->count(), 10);
-        QCOMPARE(stack->count(), 10);
+        // Task 14 added a BitTorrent category (index 7, right after Scheduler),
+        // so the count is now 11; Scheduler stays at index 6.
+        QCOMPARE(list->count(), 11);
+        QCOMPARE(stack->count(), 11);
         list->setCurrentRow(6);                 // Scheduler
         QCOMPARE(stack->currentIndex(), 6);
     }
@@ -1195,7 +1250,7 @@ private slots:
         // o header foi parar na task criada
         const auto tasks = mgr.tasks();
         QVERIFY(!tasks.isEmpty());
-        QVERIFY(tasks.last()->record().extraHeaders.contains(
+        QVERIFY(qobject_cast<DownloadTask*>(tasks.last())->record().extraHeaders.contains(
             {QByteArray("Cookie"), QByteArray("k=v")}));
     }
 
@@ -1210,8 +1265,8 @@ private slots:
         const QUuid id = w.beginBackgroundLinkForTest(url, {});
         const QString newDest = QDir(dir.path()).filePath("chosen.bin");
         w.reconcileReceivedLinkForTest(id, url, {}, /*accepted=*/true, url, newDest);
-        QCOMPARE(mgr.taskById(id)->record().destPath, newDest);
-        QVERIFY(!mgr.taskById(id)->provisionalName());          // cleared on confirm
+        QCOMPARE(qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath, newDest);
+        QVERIFY(!qobject_cast<DownloadTask*>(mgr.taskById(id))->provisionalName());          // cleared on confirm
     }
     void reconcileCancelDiscardsTask() {
         QTemporaryDir dir;
@@ -1239,7 +1294,7 @@ private slots:
         QVERIFY(mgr.taskById(id) == nullptr);                  // original discarded
         const auto tasks = mgr.tasks();
         QVERIFY(!tasks.isEmpty());
-        QCOMPARE(tasks.last()->record().url, urlB);            // restarted for the new URL
+        QCOMPARE(qobject_cast<DownloadTask*>(tasks.last())->record().url, urlB);            // restarted for the new URL
     }
     void secondLinkWhileDialogOpenEnqueuesDirectly() {
         QTemporaryDir dir;
@@ -1359,6 +1414,232 @@ private slots:
         w.applyPreferencesResultForTest(next);
         QVERIFY(fake.enabled);         // service was toggled on
         QVERIFY(fake.isEnabled());
+    }
+
+    // --- Task 13: TorrentSelection (pure logic) ---------------------------
+
+    void buildsFileTreeFromMultiFileTorrent() {
+        auto m = twoFileMeta();                       // "a.txt", "sub/b.txt"
+        auto tree = TorrentSelection::buildTree(m);
+        QVERIFY(tree.size() >= 3);                     // root + a.txt + sub/ + b.txt
+        // Root (index 0) is a folder; its direct children are a.txt and the
+        // "sub" folder (b.txt itself is one level deeper, inside "sub").
+        QCOMPARE(tree[0].fileIndex, -1);
+        QCOMPARE(tree[0].children.size(), 2);
+        // Leaves carry the right fileIndex (0 for a.txt, 1 for b.txt),
+        // wherever in the tree they actually live.
+        QSet<int> leafFileIndices;
+        for (const auto& n : tree) if (n.fileIndex >= 0) leafFileIndices.insert(n.fileIndex);
+        QCOMPARE(leafFileIndices, QSet<int>({0, 1}));
+    }
+
+    void selectedIndicesFollowChecks() {
+        auto m = twoFileMeta(); auto tree = TorrentSelection::buildTree(m);
+        // Locate file B's leaf by its fileIndex rather than a hardcoded
+        // node index: the tree shape depends on real path nesting
+        // ("sub/b.txt" puts b.txt under a "sub" folder, not at a fixed slot).
+        int fileBNode = -1;
+        for (int i = 0; i < tree.size(); ++i)
+            if (tree[i].fileIndex == 1) { fileBNode = i; break; }
+        QVERIFY(fileBNode >= 0);
+        auto sel = TorrentSelection::selectedFileIndices(tree, {fileBNode});
+        QCOMPARE(sel, QSet<int>{1});
+    }
+
+    void buildsSingleLeafForSingleFileTorrent() {
+        auto m = singleFileMeta();
+        auto tree = TorrentSelection::buildTree(m);
+        QCOMPARE(tree.size(), 1);
+        QCOMPARE(tree[0].fileIndex, 0);
+        QCOMPARE(tree[0].size, qint64(500));
+        auto sel = TorrentSelection::selectedFileIndices(tree, {0});
+        QCOMPARE(sel, QSet<int>{0});
+    }
+
+    // Regression test for a real bug: an earlier buildTree assumed every
+    // multi-file path shared a redundant top-level "torrent name" segment
+    // and discarded it. TorrentMetainfo::parse does no such thing (paths
+    // are plain relative paths - see tst_metainfo.cpp), so that assumption
+    // silently collapsed the outermost real subdirectory of every torrent.
+    // This asserts "dir/nested.txt" keeps its "dir" folder instead of
+    // nested.txt getting flattened to root alongside top.txt.
+    void buildTreeKeepsNestedSubfolder() {
+        TorrentMetainfo m;
+        m.name = "pack";
+        m.isMultiFile = true;
+        FileEntry top;    top.path    = "top.txt";        top.length    = 10; top.offset    = 0;
+        FileEntry nested; nested.path = "dir/nested.txt";  nested.length = 20; nested.offset = 10;
+        m.files = {top, nested};
+        m.totalLength = 30;
+
+        auto tree = TorrentSelection::buildTree(m);
+
+        int topIdx = -1, dirIdx = -1, nestedIdx = -1;
+        for (int i = 0; i < tree.size(); ++i) {
+            if (tree[i].fileIndex == 0 && tree[i].name == "top.txt")      topIdx    = i;
+            if (tree[i].fileIndex == -1 && tree[i].name == "dir")        dirIdx    = i;
+            if (tree[i].fileIndex == 1 && tree[i].name == "nested.txt")  nestedIdx = i;
+        }
+        QVERIFY(topIdx >= 0);
+        QVERIFY(dirIdx >= 0);
+        QVERIFY(nestedIdx >= 0);
+
+        QVERIFY(tree[0].children.contains(topIdx));         // top.txt: root-level leaf
+        QVERIFY(tree[0].children.contains(dirIdx));          // dir: root-level folder
+        QVERIFY(tree[dirIdx].children.contains(nestedIdx));  // nested.txt lives INSIDE dir...
+        QVERIFY(!tree[0].children.contains(nestedIdx));      // ...NOT collapsed onto root
+    }
+
+    // Two files with the same leaf name in different subdirectories must
+    // produce two distinct folder nodes and two distinct leaves - proof
+    // that folders are keyed by full path prefix, not just by name.
+    void buildTreeDistinguishesSameNameInDifferentFolders() {
+        TorrentMetainfo m;
+        m.name = "dupes";
+        m.isMultiFile = true;
+        FileEntry ax; ax.path = "A/x.txt"; ax.length = 5; ax.offset = 0;
+        FileEntry bx; bx.path = "B/x.txt"; bx.length = 5; bx.offset = 5;
+        m.files = {ax, bx};
+        m.totalLength = 10;
+
+        auto tree = TorrentSelection::buildTree(m);
+
+        int folderA = -1, folderB = -1;
+        for (int i = 0; i < tree.size(); ++i) {
+            if (tree[i].fileIndex == -1 && tree[i].name == "A") folderA = i;
+            if (tree[i].fileIndex == -1 && tree[i].name == "B") folderB = i;
+        }
+        QVERIFY(folderA >= 0);
+        QVERIFY(folderB >= 0);
+        QVERIFY(folderA != folderB);
+        QCOMPARE(tree[folderA].children.size(), 1);
+        QCOMPARE(tree[folderB].children.size(), 1);
+
+        const int leafA = tree[folderA].children.first();
+        const int leafB = tree[folderB].children.first();
+        QVERIFY(leafA != leafB);
+        QCOMPARE(tree[leafA].name, QString("x.txt"));
+        QCOMPARE(tree[leafB].name, QString("x.txt"));
+        QCOMPARE(tree[leafA].fileIndex, 0);
+        QCOMPARE(tree[leafB].fileIndex, 1);
+    }
+
+    // --- Task 14: Open Torrent / drag&drop / grid / context menu / prefs ---
+
+    void dropTargetsRecognizeTorrentExtension() {
+        QVERIFY(isTorrentPath("/x/y.torrent"));
+        QVERIFY(isTorrentPath("/X/Y.TORRENT"));         // case-insensitive
+        QVERIFY(!isTorrentPath("/x/y.zip"));
+        QVERIFY(!isTorrentPath("http://h/f.zip"));      // an http URL is not a torrent
+    }
+
+    void contextMenuOffersStrategyAndRecheckForTorrent() {
+        const QStringList tor = ctxTorrentItems(AbstractTask::Kind::Torrent);
+        QVERIFY(tor.contains(QStringLiteral("Rarest-first")));
+        QVERIFY(tor.contains(QStringLiteral("Sequential")));
+        QVERIFY(tor.contains(QStringLiteral("Force re-check")));
+        // Non-torrent rows get no torrent-specific items (menu unchanged).
+        QVERIFY(ctxTorrentItems(AbstractTask::Kind::Http).isEmpty());
+        QVERIFY(ctxTorrentItems(AbstractTask::Kind::Ftp).isEmpty());
+    }
+
+    void gridMapsPiecesToCellsForTorrentRow() {
+        QTemporaryDir dir;
+        TorrentMetainfo m = fourPieceMeta();
+        // Mark pieces 0 and 1 Have by writing a resume bitfield and restoring
+        // it - no networking, no NAM needed (states come from the resume file).
+        Bitfield bf(m.pieceHashes.size());
+        bf.set(0); bf.set(1);
+        const QString resumePath = QDir(dir.path()).filePath(
+            QString::fromLatin1(m.infoHash.toHex()) + ".bitfield");
+        {
+            QFile f(resumePath);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            QDataStream ds(&f); ds.setByteOrder(QDataStream::BigEndian);
+            // Header mirrors TorrentTask::saveResumeNow (magic "OBBT", version 1).
+            ds << quint32(0x4F424254) << quint32(1) << qint32(m.pieceHashes.size())
+               << qint64(m.pieceLength) << qint64(m.totalLength) << bf.toBytes();
+        }
+        RateLimiter limiter;
+        TorrentTask task(m, dir.path(), QSet<int>{0}, PieceStrategy::RarestFirst,
+                         6881, 50, ResumeVerifyMode::TrustBitfield, /*rngSeed=*/1,
+                         /*nam=*/nullptr, &limiter, /*logger=*/nullptr, dir.path());
+        task.restoreBitfield();
+        QCOMPARE(task.pieceState(0), PieceState::Have);
+        QCOMPARE(task.pieceState(2), PieceState::Missing);
+
+        ProgressGridWidget w;
+        w.resize(200, 80);
+        w.setTask(&task);
+        const auto cells = w.cellsForTest();
+        QCOMPARE(cells.size(), 4);                        // one cell per piece
+        QCOMPARE(cells[0].kind, CellKind::Downloaded);    // Have -> have/done bucket
+        QCOMPARE(cells[1].kind, CellKind::Downloaded);
+        QCOMPARE(cells[2].kind, CellKind::Pending);       // Missing -> pending
+        QCOMPARE(cells[3].kind, CellKind::Pending);
+    }
+
+    void preferencesRoundTripsBitTorrentPrefs() {
+        AppSettings in;
+        in.bittorrent.maxPeersPerTorrent = 50;
+        PreferencesDialog dlg(in);
+        dlg.setBtMaxPeersForTest(80);
+        dlg.setBtListenPortForTest(6969);
+        dlg.setBtVerifyForTest(ResumeVerifyMode::RecheckOnOpen);
+        dlg.setBtStrategyForTest(PieceStrategy::Sequential);
+        const AppSettings out = dlg.result();
+        QCOMPARE(out.bittorrent.maxPeersPerTorrent, 80);
+        QCOMPARE(out.bittorrent.listenPort, quint16(6969));
+        QVERIFY(out.bittorrent.verify == ResumeVerifyMode::RecheckOnOpen);
+        QVERIFY(out.bittorrent.defaultStrategy == PieceStrategy::Sequential);
+    }
+
+    void bitTorrentPrefsEqualityDetectsChange() {
+        BitTorrentPrefs a, b;
+        QVERIFY(a == b);
+        b.listenPort = 7000;
+        QVERIFY(a != b);
+    }
+
+    // --- Task 13: TorrentOpenDialog (offscreen smoke test) -----------------
+
+    void torrentOpenDialogConstructsAndExposesGetters() {
+        auto m = twoFileMeta();                             // "a.txt", "sub/b.txt"
+        TorrentOpenDialog dlg(m, "/tmp/orbit-downloads", PieceStrategy::Sequential);
+
+        QCOMPARE(dlg.destDir(), QString("/tmp/orbit-downloads"));
+        QVERIFY(dlg.strategy() == PieceStrategy::Sequential);
+        // All files checked by default.
+        QCOMPARE(dlg.selectedFiles(), QSet<int>({0, 1}));
+
+        auto* tree = dlg.findChild<QTreeWidget*>("fileTree");
+        QVERIFY(tree != nullptr);
+        QCOMPARE(tree->topLevelItemCount(), 1);
+
+        auto* dirEdit = dlg.findChild<QLineEdit*>("destDirEdit");
+        QVERIFY(dirEdit != nullptr);
+        dirEdit->setText("/tmp/other-dir");
+        QCOMPARE(dlg.destDir(), QString("/tmp/other-dir"));
+
+        // b.txt lives one level down, inside the "sub" folder item (NOT a
+        // direct child of root - that was the bug this dialog test would
+        // have masked with the old "root/a.txt"/"root/b.txt" fixture).
+        QTreeWidgetItem* root = tree->topLevelItem(0);
+        QCOMPARE(root->childCount(), 2);   // a.txt + sub
+        QTreeWidgetItem* subFolder = nullptr;
+        for (int i = 0; i < root->childCount(); ++i)
+            if (root->child(i)->text(0) == "sub") subFolder = root->child(i);
+        QVERIFY(subFolder != nullptr);
+        QCOMPARE(subFolder->childCount(), 1);
+        QTreeWidgetItem* fileB = subFolder->child(0);
+        QCOMPARE(fileB->text(0), QString("b.txt"));
+
+        // Unchecking file B's leaf must drop it from selectedFiles() and
+        // partially-tristate both the "sub" folder and the root above it.
+        fileB->setCheckState(0, Qt::Unchecked);
+        QCOMPARE(dlg.selectedFiles(), QSet<int>({0}));
+        QCOMPARE(subFolder->checkState(0), Qt::Unchecked);   // sub's only child is now unchecked
+        QCOMPARE(root->checkState(0), Qt::PartiallyChecked); // a.txt still checked, sub is not
     }
 };
 

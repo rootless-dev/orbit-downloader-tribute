@@ -8,7 +8,7 @@
 #include <QUuid>
 #include <QVector>
 class DownloadManager;
-class DownloadTask;
+class AbstractTask;
 
 class DownloadTableModel : public QAbstractTableModel {
     Q_OBJECT
@@ -20,16 +20,16 @@ public:
     int      columnCount(const QModelIndex& = {}) const override;
     QVariant data(const QModelIndex&, int role = Qt::DisplayRole) const override;
     QVariant headerData(int, Qt::Orientation, int) const override;
-    void          appendTask(DownloadTask* t);
+    void          appendTask(AbstractTask* t);
     void          removeTaskById(const QUuid& id);
     void          refreshRow(const QUuid& id);
-    DownloadTask* taskAt(int row) const;
+    AbstractTask* taskAt(int row) const;
 private slots:
     void onTaskProgress(const QUuid& id, qint64 received, qint64 total);
     void onTaskStateChanged(const QUuid& id, DownloadState s);
     void onSpeedTick();
 private:
-    struct Row { DownloadTask* task; qint64 received = 0; qint64 total = -1; SpeedSampler sampler; };
+    struct Row { AbstractTask* task; qint64 received = 0; qint64 total = -1; SpeedSampler sampler; };
     int rowForId(const QUuid& id) const;
     DownloadManager*  m_mgr;
     QVector<Row>      m_rows;

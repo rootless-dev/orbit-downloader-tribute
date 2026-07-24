@@ -32,11 +32,20 @@ struct SchedulerConfig {
     bool operator==(const SchedulerConfig&) const = default;
 };
 
+struct BitTorrentPrefs {
+    int               maxPeersPerTorrent = 50;
+    ResumeVerifyMode  verify             = ResumeVerifyMode::TrustBitfield;
+    PieceStrategy     defaultStrategy    = PieceStrategy::RarestFirst;
+    quint16           listenPort         = 6881;
+    bool operator==(const BitTorrentPrefs&) const = default;   // != synthesized (C++20)
+};
+
 struct AppSettings {
-    EngineConfig    engine;
-    UiPrefs         ui;
-    SchedulerConfig scheduler;
-    BrowserPrefs    browser;
+    EngineConfig     engine;
+    UiPrefs          ui;
+    SchedulerConfig  scheduler;
+    BrowserPrefs     browser;
+    BitTorrentPrefs  bittorrent;
 };
 
 namespace SettingsIo {

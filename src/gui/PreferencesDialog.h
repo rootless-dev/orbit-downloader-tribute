@@ -15,7 +15,7 @@ class PreferencesDialog : public QDialog {
 public:
     enum class Category {
         General, Location, DownloadsConnection, Limits, Appearance,
-        Monitoring, Scheduler, P2PNetwork, Proxy, Others
+        Monitoring, Scheduler, BitTorrent, P2PNetwork, Proxy, Others
     };
 
     explicit PreferencesDialog(const AppSettings& current, QWidget* parent = nullptr);
@@ -33,6 +33,10 @@ public:
     void setSchedulerStopForTest(QTime t);
     void setSchedulerRecurrenceForTest(Recurrence r);
     void setSchedulerQuitForTest(bool on);
+    void setBtMaxPeersForTest(int n);
+    void setBtListenPortForTest(quint16 p);
+    void setBtVerifyForTest(ResumeVerifyMode m);
+    void setBtStrategyForTest(PieceStrategy s);
 
 private:
     void loadFromSettings(const AppSettings& s);   // (re)apply values onto existing widgets
@@ -69,4 +73,9 @@ private:
     QTimeEdit* m_schedStop       = nullptr;
     QComboBox* m_schedRecurrence = nullptr;
     QCheckBox* m_schedQuit       = nullptr;
+    // BitTorrent
+    QSpinBox*  m_btMaxPeers   = nullptr;
+    QComboBox* m_btVerify     = nullptr;
+    QComboBox* m_btStrategy   = nullptr;
+    QSpinBox*  m_btListenPort = nullptr;
 };

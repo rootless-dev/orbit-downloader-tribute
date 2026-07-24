@@ -1,6 +1,10 @@
 #include "MainWindow.h"
 #include "DownloadManager.h"
+#include "AbstractTask.h"
 #include "DownloadTask.h"
+#include "torrent/TorrentTask.h"
+#include "torrent/TorrentMetainfo.h"
+#include "TorrentOpenDialog.h"
 #include "DownloadTableModel.h"
 #include "CategoryFilterProxy.h"
 #include "CategoryTree.h"
@@ -130,6 +134,17 @@ MainWindow::MainWindow(DownloadManager* mgr, DownloadTableModel* model,
     propScroll->setWidgetResizable(true);
     propScroll->setFrameShape(QFrame::NoFrame);
 
+    // Keep Properties live for a selected torrent (peer count/tracker status
+    // change continuously while leeching): re-render on a light tick whenever
+    // the panel is actually visible. QTabWidget hides the widgets of
+    // non-current tabs, so m_props->isVisible() doubles as "Properties tab is
+    // the one showing" with no extra bookkeeping.
+    m_propsRefreshTimer = new QTimer(this);
+    connect(m_propsRefreshTimer, &QTimer::timeout, this, [this] {
+        if (m_props->isVisible()) refreshProperties();
+    });
+    m_propsRefreshTimer->start(2000);
+
     auto* tabs = new QTabWidget(this);
     tabs->addTab(m_log,      "Log");
     tabs->addTab(gridScroll, "Progress");
@@ -196,6 +211,8 @@ MainWindow::MainWindow(DownloadManager* mgr, DownloadTableModel* model,
     QMenu* file = mb->addMenu(tr("&File"));
     aNew->setShortcut(QKeySequence::New);
     file->addAction(aNew);                        // reusa "New" do toolbar
+    QAction* aOpenTorrent = file->addAction(tr("Open Torrent…"));
+    connect(aOpenTorrent, &QAction::triggered, this, &MainWindow::onOpenTorrent);
     QAction* aOpenFolder = file->addAction(tr("Open downloads folder"));
     connect(aOpenFolder, &QAction::triggered, this, [this]{
         QDesktopServices::openUrl(QUrl::fromLocalFile(defaultDir()));
@@ -273,7 +290,7 @@ QUuid MainWindow::selectedId() const {
     const QModelIndex cur = m_table->currentIndex();
     if (!cur.isValid()) return {};
     const QModelIndex src = m_proxy->mapToSource(cur);
-    DownloadTask* t = m_model->taskAt(src.row());
+    AbstractTask* t = m_model->taskAt(src.row());
     return t ? t->id() : QUuid();
 }
 
@@ -296,6 +313,52 @@ void MainWindow::addUrlViaDialog(const QUrl& prefill) {
     m_model->appendTask(m_mgr->taskById(id));
 }
 
+// File > Open Torrent… : pick a .torrent, then route through the shared open
+// flow (parse -> TorrentOpenDialog -> addTorrent).
+void MainWindow::onOpenTorrent() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Open Torrent"), defaultDir(), tr("Torrent files (*.torrent)"));
+    if (path.isEmpty()) return;
+    openTorrentFile(path);
+}
+
+// Shared .torrent open flow (menu + drag&drop): read the file, parse the
+// metainfo (error box + abort on failure), let the user pick destination /
+// files / strategy, then hand it to the engine. addTorrent copies the file
+// into the data dir, so the task survives the original file going away.
+void MainWindow::openTorrentFile(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Open Torrent"),
+            tr("Could not read the file:\n%1").arg(path));
+        return;
+    }
+    const QByteArray bytes = f.readAll();
+    bool ok = false;
+    QString err;
+    const TorrentMetainfo meta = TorrentMetainfo::parse(bytes, &ok, &err);
+    if (!ok) {
+        QMessageBox::warning(this, tr("Open Torrent"),
+            tr("This is not a valid .torrent file:\n%1").arg(err));
+        return;
+    }
+    TorrentOpenDialog dlg(meta, defaultDir(), m_settings.bittorrent.defaultStrategy, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QUuid id = m_mgr->addTorrent(path, dlg.destDir(), dlg.selectedFiles(), dlg.strategy());
+    if (id.isNull()) {
+        QMessageBox::warning(this, tr("Open Torrent"), tr("Could not add the torrent."));
+        return;
+    }
+    m_lastDir = dlg.destDir();                         // remember this session's folder
+    m_torrentStrategy[id] = dlg.strategy();
+    // addTorrent de-duplicates by info-hash: only append if not already listed.
+    AbstractTask* task = m_mgr->taskById(id);
+    bool inModel = false;
+    for (int r = 0; r < m_model->rowCount(); ++r)
+        if (m_model->taskAt(r) == task) { inModel = true; break; }
+    if (!inModel) m_model->appendTask(task);
+}
+
 void MainWindow::enqueue(const QUrl& url, const QString& dir) {
     // provisionalName=true: o nome saiu da URL (palpite) — o motor adota o
     // Content-Disposition do servidor se houver (clipboard/drag).
@@ -303,11 +366,31 @@ void MainWindow::enqueue(const QUrl& url, const QString& dir) {
     m_model->appendTask(m_mgr->taskById(id));   // UrlName.h (Fase 2)
 }
 
+// A dropped .torrent file has no downloadable URL scheme (it's file://), so
+// extractUrls() would reject it. Accept the drag when either a downloadable
+// URL OR a local .torrent file is present.
+static QString droppedTorrentPath(const QMimeData* mime) {
+    if (mime && mime->hasUrls())
+        for (const QUrl& u : mime->urls())
+            if (u.isLocalFile() && isTorrentPath(u.toLocalFile()))
+                return u.toLocalFile();
+    return {};
+}
+
 void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
-    if (!extractUrls(e->mimeData()).isEmpty()) e->acceptProposedAction();
+    if (!extractUrls(e->mimeData()).isEmpty() || !droppedTorrentPath(e->mimeData()).isEmpty())
+        e->acceptProposedAction();
 }
 
 void MainWindow::dropEvent(QDropEvent* e) {
+    // A dropped .torrent takes the Open Torrent flow, not the URL/link path.
+    const QString torrentPath = droppedTorrentPath(e->mimeData());
+    if (!torrentPath.isEmpty()) {
+        e->acceptProposedAction();
+        openTorrentFile(torrentPath);
+        return;
+    }
+
     const auto urls = extractUrls(e->mimeData());
     if (urls.isEmpty()) return;               // rejeitado, sem diálogo de erro
     e->acceptProposedAction();
@@ -347,7 +430,7 @@ void MainWindow::onTableContextMenu(const QPoint& pos) {
     m_table->setCurrentIndex(ix);                 // seleção reflete a linha clicada;
                                                   // selectedId() (usado pelos handlers) segue-a
     const QUuid id = selectedId();
-    DownloadTask* t = id.isNull() ? nullptr : m_mgr->taskById(id);
+    AbstractTask* t = id.isNull() ? nullptr : m_mgr->taskById(id);
     if (!t) return;
     const DownloadState s = t->state();
 
@@ -388,6 +471,36 @@ void MainWindow::onTableContextMenu(const QPoint& pos) {
     connect(pNorm, &QAction::triggered, this, [this, id]{ m_mgr->setPriority(id, Priority::Normal); m_model->refreshRow(id); });
     connect(pLow,  &QAction::triggered, this, [this, id]{ m_mgr->setPriority(id, Priority::Low);    m_model->refreshRow(id); });
 
+    // Torrent-only items (menu unchanged for HTTP/FTP): a checkable piece-
+    // strategy submenu and Force re-check. The chosen strategy is remembered
+    // per-torrent for this session so the radio reflects the current pick.
+    if (TorrentTask* tor = qobject_cast<TorrentTask*>(t)) {
+        menu.addSeparator();
+        const PieceStrategy cur =
+            m_torrentStrategy.value(id, m_settings.bittorrent.defaultStrategy);
+        QMenu* strat = menu.addMenu(tr("Piece strategy"));
+        QAction* sRare = strat->addAction(tr("Rarest-first"));
+        QAction* sSeq  = strat->addAction(tr("Sequential"));
+        auto* sGroup = new QActionGroup(strat);
+        sGroup->setExclusive(true);
+        for (auto* a : {sRare, sSeq}) { a->setCheckable(true); sGroup->addAction(a); }
+        sRare->setChecked(cur == PieceStrategy::RarestFirst);
+        sSeq ->setChecked(cur == PieceStrategy::Sequential);
+        connect(sRare, &QAction::triggered, this, [this, tor, id]{
+            tor->setStrategy(PieceStrategy::RarestFirst);
+            m_torrentStrategy[id] = PieceStrategy::RarestFirst;
+        });
+        connect(sSeq, &QAction::triggered, this, [this, tor, id]{
+            tor->setStrategy(PieceStrategy::Sequential);
+            m_torrentStrategy[id] = PieceStrategy::Sequential;
+        });
+        QAction* aRecheck = menu.addAction(tr("Force re-check"));
+        connect(aRecheck, &QAction::triggered, this, [this, tor, id]{
+            tor->forceRecheck();
+            m_model->refreshRow(id);
+        });
+    }
+
     menu.exec(m_table->viewport()->mapToGlobal(pos));
 }
 
@@ -410,13 +523,15 @@ void MainWindow::onMove() {
 
 void MainWindow::onOpen() {
     const QUuid id = selectedId();
-    DownloadTask* t = id.isNull() ? nullptr : m_mgr->taskById(id);
+    // record().destPath is DownloadTask-specific; not yet meaningful for a
+    // Torrent Kind, so no-op there instead of crashing.
+    DownloadTask* t = id.isNull() ? nullptr : qobject_cast<DownloadTask*>(m_mgr->taskById(id));
     if (t) QDesktopServices::openUrl(QUrl::fromLocalFile(t->record().destPath));
 }
 
 void MainWindow::onOpenFolder() {
     const QUuid id = selectedId();
-    DownloadTask* t = id.isNull() ? nullptr : m_mgr->taskById(id);
+    DownloadTask* t = id.isNull() ? nullptr : qobject_cast<DownloadTask*>(m_mgr->taskById(id));
     if (!t) return;
     const QString path = t->record().destPath;
 #ifdef Q_OS_MACOS
@@ -430,7 +545,7 @@ void MainWindow::onOpenFolder() {
 // cancelado (ctxCanStart) -> inicia; ativo (Connecting/Downloading) -> no-op.
 void MainWindow::onItemDoubleClicked(const QModelIndex&) {
     const QUuid id = selectedId();
-    DownloadTask* t = id.isNull() ? nullptr : m_mgr->taskById(id);
+    AbstractTask* t = id.isNull() ? nullptr : m_mgr->taskById(id);
     if (!t) return;
     if (t->state() == DownloadState::Completed) onOpen();
     else if (ctxCanStart(t->state()))           onStart();
@@ -442,7 +557,7 @@ void MainWindow::onItemDoubleClicked(const QModelIndex&) {
 // enquanto itera.
 void MainWindow::clearCompleted() {
     QVector<QUuid> done;
-    for (DownloadTask* t : m_mgr->tasks())
+    for (AbstractTask* t : m_mgr->tasks())
         if (t->state() == DownloadState::Completed) done.append(t->id());
     for (const QUuid& id : done) {
         m_mgr->remove(id, /*deleteFiles=*/false);
@@ -454,17 +569,13 @@ void MainWindow::clearCompleted() {
 
 void MainWindow::onSelectionChanged() {
     const QUuid id = selectedId();
-    DownloadTask* t = id.isNull() ? nullptr : m_mgr->taskById(id);
-    m_grid->setTask(t);
-    if (!t) {
-        m_props->setText("—");
-    } else {
-        const auto r = t->record();
-        m_props->setText(QString("URL: %1\nDest: %2\nSize: %3\nSegments: %4\nRange: %5")
-            .arg(r.url.toString(), r.destPath)
-            .arg(r.totalBytes).arg(r.segmentCount).arg(r.supportsRange ? "yes" : "no"));
-    }
+    AbstractTask* at = id.isNull() ? nullptr : m_mgr->taskById(id);
+    // The grid now accepts any kind: DownloadTask renders byte segments,
+    // TorrentTask renders piece cells; anything else clears it.
+    m_grid->setTask(at);
+    refreshProperties();
 
+    DownloadTask* t = qobject_cast<DownloadTask*>(at);
     // Log por-download: recarrega o arquivo do item selecionado e passa a
     // anexar as novas linhas dele (ver onLogLine).
     m_logShownId = id;
@@ -476,11 +587,40 @@ void MainWindow::onSelectionChanged() {
     }
 }
 
+// (Re)renders the Properties label for whatever row is currently selected.
+// Called on selection change and, for a selected torrent, on the ~2s
+// m_propsRefreshTimer tick so peer/tracker diagnostics stay live without
+// requiring the user to reselect the row.
+void MainWindow::refreshProperties() {
+    const QUuid id = selectedId();
+    AbstractTask* at = id.isNull() ? nullptr : m_mgr->taskById(id);
+    DownloadTask* t = qobject_cast<DownloadTask*>(at);
+    TorrentTask*  tor = qobject_cast<TorrentTask*>(at);
+    if (!at) {
+        m_props->setText("—");
+    } else if (t) {
+        const auto r = t->record();
+        m_props->setText(QString("URL: %1\nDest: %2\nSize: %3\nSegments: %4\nRange: %5")
+            .arg(r.url.toString(), r.destPath)
+            .arg(r.totalBytes).arg(r.segmentCount).arg(r.supportsRange ? "yes" : "no"));
+    } else if (tor) {
+        const auto& meta = tor->metainfo();
+        m_props->setText(QString("Torrent: %1\nSize: %2\nPieces: %3\nFiles: %4\n"
+                                  "Peers: %5 (%6 unchoked)\nTracker: %7")
+            .arg(meta.name)
+            .arg(tor->totalBytes()).arg(meta.pieceHashes.size()).arg(meta.files.size())
+            .arg(tor->connectedPeerCount()).arg(tor->unchokedPeerCount())
+            .arg(tor->trackerStatus()));
+    } else {
+        m_props->setText("—");
+    }
+}
+
 void MainWindow::onStateChanged(const QUuid& id, int state) {
-    DownloadTask* t = m_mgr->taskById(id);
+    DownloadTask* t = qobject_cast<DownloadTask*>(m_mgr->taskById(id));
     const QString name = t ? QFileInfo(t->record().destPath).fileName() : id.toString();
     static const char* names[] = {"Queued","Connecting","Downloading","Paused",
-                                  "Completed","Error","Cancelled"};
+                                  "Completed","Error","Cancelled","Checking"};
     if (m_logger)
         m_logger->logApp(state == int(DownloadState::Error) ? LogLevel::Error : LogLevel::Info,
                          QString("%1 -> %2").arg(name, names[state]));
@@ -623,7 +763,7 @@ void MainWindow::reconcileReceivedLink(const QUuid& id, const QUrl& origUrl,
         if (!nid.isNull()) m_model->appendTask(m_mgr->taskById(nid));
         return;
     }
-    DownloadTask* t = m_mgr->taskById(id);
+    DownloadTask* t = qobject_cast<DownloadTask*>(m_mgr->taskById(id));
     if (!t) return;
     m_lastDir = QFileInfo(chosenDest).absolutePath();    // remember chosen folder this session
     if (chosenDest != t->record().destPath)
@@ -712,7 +852,7 @@ void MainWindow::maybeQuitWhenDone() {
     if (!m_settings.scheduler.quitWhenDone) return;
     const auto tasks = m_mgr->tasks();
     if (tasks.isEmpty()) return;                       // não fecha app vazio
-    for (DownloadTask* t : tasks)
+    for (AbstractTask* t : tasks)
         if (t->state() != DownloadState::Completed) return;
     qApp->quit();
 }
@@ -755,6 +895,8 @@ void MainWindow::applyPreferencesResult(const AppSettings& r) {
     m_settings = r;
     applyTheme(m_settings.ui.theme);              // aplica o tema ao vivo (onPreferences não passa por applySettings)
     m_mgr->setConfig(m_settings.engine);
+    m_mgr->setTorrentDefaults(m_settings.bittorrent.maxPeersPerTorrent,
+                              m_settings.bittorrent.listenPort, m_settings.bittorrent.verify);
     applyBrowserBridge(m_settings.browser);
     if (scheduleChanged)                          // só re-arma (e dá o tick imediato) se o agendamento mudou
         applySchedulerConfig(m_settings.scheduler);
@@ -780,7 +922,7 @@ void MainWindow::applyPreferencesResult(const AppSettings& r) {
 void MainWindow::onCopyUrl() {
     const QUuid id = selectedId();
     if (id.isNull()) return;
-    DownloadTask* t = m_mgr->taskById(id);
+    DownloadTask* t = qobject_cast<DownloadTask*>(m_mgr->taskById(id));
     if (!t) return;
     if (m_clip) m_clip->markSelfCopy();           // não re-oferecer o que a app copiou
     QApplication::clipboard()->setText(t->record().url.toString());

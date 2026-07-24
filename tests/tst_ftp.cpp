@@ -404,7 +404,7 @@ private slots:
         QVERIFY(!id.isNull());
 
         QVERIFY(QTest::qWaitFor([&]{
-            DownloadTask* t = mgr.taskById(id);
+            AbstractTask* t = mgr.taskById(id);
             return t && t->state() == DownloadState::Completed;
         }, 15000));
 
@@ -428,7 +428,7 @@ private slots:
         const QUuid id = mgr.addDownload(srv.url(), dest);
 
         QVERIFY(QTest::qWaitFor([&]{
-            DownloadTask* t = mgr.taskById(id);
+            AbstractTask* t = mgr.taskById(id);
             return t && t->state() == DownloadState::Completed;
         }, 15000));
 
@@ -513,7 +513,7 @@ private slots:
         QVERIFY(!id.isNull());
 
         QVERIFY(QTest::qWaitFor([&]{
-            DownloadTask* t = mgr.taskById(id);
+            AbstractTask* t = mgr.taskById(id);
             return t && t->state() == DownloadState::Completed;
         }, 20000));
 
@@ -619,7 +619,7 @@ private slots:
             QVERIFY(QTest::qWaitFor([&]{ return got > 0; }, 10000));
             mgr.pause(id);
             QVERIFY(QTest::qWaitFor([&]{
-                DownloadTask* t = mgr.taskById(id);
+                AbstractTask* t = mgr.taskById(id);
                 return t && t->state() == DownloadState::Paused;
             }, 5000));
             QVERIFY(got < body.size());     // realmente parou no meio
@@ -635,7 +635,7 @@ private slots:
             const QUuid id = mgr.tasks().first()->id();
             mgr.resume(id);
             QVERIFY(QTest::qWaitFor([&]{
-                DownloadTask* t = mgr.taskById(id);
+                AbstractTask* t = mgr.taskById(id);
                 return t && t->state() == DownloadState::Completed;
             }, 20000));
         }
@@ -667,7 +667,7 @@ private slots:
             QVERIFY(QTest::qWaitFor([&]{ return got > 0; }, 10000));
             mgr.pause(id);
             QVERIFY(QTest::qWaitFor([&]{
-                DownloadTask* t = mgr.taskById(id);
+                AbstractTask* t = mgr.taskById(id);
                 return t && t->state() == DownloadState::Paused;
             }, 5000));
             QVERIFY(got < v1.size());
@@ -686,7 +686,7 @@ private slots:
             const QUuid id = mgr.tasks().first()->id();
             mgr.resume(id);
             QVERIFY(QTest::qWaitFor([&]{
-                DownloadTask* t = mgr.taskById(id);
+                AbstractTask* t = mgr.taskById(id);
                 return t && t->state() == DownloadState::Completed;
             }, 20000));
         }
@@ -719,7 +719,7 @@ private slots:
 
         mgr.provideCredentials(id, "bob", "secret");
         QVERIFY(QTest::qWaitFor([&]{
-            DownloadTask* t = mgr.taskById(id);
+            AbstractTask* t = mgr.taskById(id);
             return t && t->state() == DownloadState::Completed;
         }, 20000));
 
@@ -752,7 +752,7 @@ private slots:
             QVERIFY(QTest::qWaitFor([&]{ return got > 0; }, 10000));
             mgr.pause(id);
             QVERIFY(QTest::qWaitFor([&]{
-                DownloadTask* t = mgr.taskById(id);
+                AbstractTask* t = mgr.taskById(id);
                 return t && t->state() == DownloadState::Paused;
             }, 5000));
             QVERIFY(got < body.size());
@@ -777,7 +777,7 @@ private slots:
 
             mgr.provideCredentials(id, "bob", "secret");
             QVERIFY(QTest::qWaitFor([&]{
-                DownloadTask* t = mgr.taskById(id);
+                AbstractTask* t = mgr.taskById(id);
                 return t && t->state() == DownloadState::Completed;
             }, 20000));
         }
@@ -801,7 +801,7 @@ private slots:
 
         const QUuid id = mgr.addDownload(srv.url(), dir.path() + "/out.bin");
         QVERIFY(QTest::qWaitFor([&]{
-            DownloadTask* t = mgr.taskById(id);
+            AbstractTask* t = mgr.taskById(id);
             return t && t->state() == DownloadState::Error;
         }, 10000));
         QCOMPARE(ask.count(), 0);                 // nunca pediu credenciais

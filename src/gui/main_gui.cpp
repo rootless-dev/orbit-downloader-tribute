@@ -47,6 +47,10 @@ int main(int argc, char** argv) {
 
     Logger logger(dataDir);
     DownloadManager mgr(settings.engine, dataDir, &logger);
+    // BitTorrent prefs are plain values (core can't see the GUI's BitTorrentPrefs
+    // struct) — apply BEFORE loadSession() so resumed torrents honor them too.
+    mgr.setTorrentDefaults(settings.bittorrent.maxPeersPerTorrent,
+                            settings.bittorrent.listenPort, settings.bittorrent.verify);
     mgr.loadSession();                    // restore tasks BEFORE building the model
     DownloadTableModel model(&mgr);       // ctor seeds rows from mgr.tasks()
 

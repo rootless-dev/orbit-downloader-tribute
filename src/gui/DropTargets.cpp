@@ -9,6 +9,10 @@ bool isDownloadableScheme(const QUrl& u) {
     return s == "http" || s == "https" || s == "ftp";
 }
 
+bool isTorrentPath(const QString& path) {
+    return path.endsWith(QStringLiteral(".torrent"), Qt::CaseInsensitive);
+}
+
 static void appendIfNew(QList<QUrl>& out, QSet<QString>& seen, const QUrl& u) {
     if (!isDownloadableScheme(u)) return;
     const QString key = u.toString();

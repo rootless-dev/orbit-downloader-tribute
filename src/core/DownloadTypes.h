@@ -10,8 +10,21 @@
 
 using HeaderList = QList<QPair<QByteArray, QByteArray>>;
 
-enum class DownloadState { Queued, Connecting, Downloading, Paused, Completed, Error, Cancelled };
+// Checking appended at the END (not alphabetized/grouped with the other
+// states): DownloadRecord::state is persisted as a raw int (see
+// Persistence::writeSession/readSession), so inserting it anywhere else would
+// shift the numeric value of every state after it and corrupt any
+// downloads.json written by a previous build. Checking = 7.
+enum class DownloadState { Queued, Connecting, Downloading, Paused, Completed, Error, Cancelled,
+                            Checking };
 enum class Priority { High, Normal, Low };
+enum class PieceStrategy { RarestFirst, Sequential };
+enum class ResumeVerifyMode { TrustBitfield, RecheckOnOpen };
+
+// Per-piece lifecycle state for a torrent download, surfaced to the GUI grid
+// (Task 10). Missing = not yet obtained; InFlight = one or more of its blocks
+// have been requested from a peer; Have = downloaded, hash-verified, written.
+enum class PieceState { Missing, InFlight, Have };
 
 inline const char* stateName(DownloadState s) {
     switch (s) {
@@ -22,6 +35,7 @@ inline const char* stateName(DownloadState s) {
         case DownloadState::Completed:   return "Completed";
         case DownloadState::Error:       return "Error";
         case DownloadState::Cancelled:   return "Cancelled";
+        case DownloadState::Checking:    return "Checking";
     }
     return "Unknown";
 }
@@ -78,3 +92,4 @@ struct ProbeResult {
 };
 
 Q_DECLARE_METATYPE(ProbeResult)
+Q_DECLARE_METATYPE(PieceState)

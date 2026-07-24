@@ -23,6 +23,7 @@
 #include "HttpProbe.h"
 #include "SegmentWorker.h"
 #include "DownloadTask.h"
+#include "AbstractTask.h"
 #include "DownloadManager.h"
 #include "Persistence.h"
 #include "Logger.h"
@@ -55,7 +56,7 @@ static QByteArray readFile(const QString& path) {
 
 static bool waitForState(DownloadManager& mgr, const QUuid& id, DownloadState want, int timeoutMs) {
     return QTest::qWaitFor([&]{
-        DownloadTask* t = mgr.taskById(id);
+        AbstractTask* t = mgr.taskById(id);
         return t && t->state() == want;
     }, timeoutMs);
 }
@@ -651,7 +652,7 @@ private slots:
 
         auto addWaitPause = [&](const QString& dest) {
             mgr.addDownload(srv.url("/ranged"), dest);
-            DownloadTask* t = mgr.tasks().last();
+            AbstractTask* t = mgr.tasks().last();
             QTRY_VERIFY_WITH_TIMEOUT(t->state() == DownloadState::Downloading, 5000);
             t->pause();
             QTRY_COMPARE(t->state(), DownloadState::Paused);
@@ -671,7 +672,7 @@ private slots:
         QVERIFY2(peak <= 1, qPrintable(QString("peak concurrent active tasks (%1) exceeded cap (1) across resumeAll()").arg(peak)));
 
         for (auto* t : mgr.tasks()) {
-            QFile f(t->record().destPath);
+            QFile f(qobject_cast<DownloadTask*>(t)->record().destPath);
             QVERIFY(f.open(QIODevice::ReadOnly));
             QCOMPARE(f.readAll(), body);
         }
@@ -757,7 +758,8 @@ private slots:
         // Downloading the instant the wait returns and pause() runs.
         auto addWaitPause = [&](const QString& dest) {
             mgr.addDownload(srv.url("/ranged"), dest);
-            DownloadTask* t = mgr.tasks().last();
+            // segmentProgress is DownloadTask-specific (not on AbstractTask).
+            DownloadTask* t = qobject_cast<DownloadTask*>(mgr.tasks().last());
             QSignalSpy segProg(t, &DownloadTask::segmentProgress);
             QVERIFY(segProg.wait(5000));
             QCOMPARE(t->state(), DownloadState::Downloading);
@@ -783,7 +785,7 @@ private slots:
 
         for (auto* t : mgr.tasks()) {
             if (t == mgr.tasks().first()) continue;   // Cbad never wrote real bytes
-            QFile f(t->record().destPath);
+            QFile f(qobject_cast<DownloadTask*>(t)->record().destPath);
             QVERIFY(f.open(QIODevice::ReadOnly));
             QCOMPARE(f.readAll(), body);
         }
@@ -825,8 +827,8 @@ private slots:
         {   // "session 1": start, pause mid-way, let manager persist session
             DownloadManager mgr(cfg, data.path());
             const QUuid id = mgr.addDownload(srv.url("/ranged"), dest);
-            DownloadTask* t = mgr.tasks().first();
-            QSignalSpy prog(t, &DownloadTask::progress);
+            AbstractTask* t = mgr.tasks().first();
+            QSignalSpy prog(t, &AbstractTask::progress);
             QVERIFY(prog.wait(3000));
             mgr.pauseAll();                 // writes downloads.json + .meta
             QTRY_COMPARE(t->state(), DownloadState::Paused);
@@ -916,7 +918,8 @@ private slots:
         QVector<QUuid> ids;
         auto addWaitPause = [&](const QString& dest) {
             QUuid id = mgr.addDownload(srv.url("/ranged"), dest);
-            DownloadTask* t = mgr.taskById(id);
+            // segmentProgress is DownloadTask-specific (not on AbstractTask).
+            DownloadTask* t = qobject_cast<DownloadTask*>(mgr.taskById(id));
             QSignalSpy segProg(t, &DownloadTask::segmentProgress);
             QVERIFY(segProg.wait(5000));
             QCOMPARE(t->state(), DownloadState::Downloading);
@@ -940,7 +943,7 @@ private slots:
                                                 "across a per-id resume() loop").arg(peak)));
 
         for (auto* t : mgr.tasks()) {
-            QFile f(t->record().destPath);
+            QFile f(qobject_cast<DownloadTask*>(t)->record().destPath);
             QVERIFY(f.open(QIODevice::ReadOnly));
             QCOMPARE(f.readAll(), body);
         }
@@ -1014,7 +1017,7 @@ private slots:
         // permitir ambos concluírem.
         EngineConfig hi = cfg; hi.maxConcurrentDownloads = 4;
         mgr.setConfig(hi);
-        DownloadTask* tb = mgr.taskById(b);
+        AbstractTask* tb = mgr.taskById(b);
         QVERIFY(tb);
         QTRY_COMPARE_WITH_TIMEOUT(tb->state(), DownloadState::Completed, 5000);
     }
@@ -1035,7 +1038,7 @@ private slots:
         QVERIFY(waitForState(mgr, id, DownloadState::Downloading, 5000));
         QVERIFY(QFile::exists(dir + "/movie.bin"));                 // pré-alocado ao iniciar
         mgr.cancel(id);
-        DownloadTask* t = mgr.taskById(id);
+        AbstractTask* t = mgr.taskById(id);
         QVERIFY(t);
         QCOMPARE(t->state(), DownloadState::Cancelled);            // fica na lista
         QVERIFY(!QFile::exists(dir + "/movie.bin"));               // parcial apagado
@@ -1129,7 +1132,7 @@ private slots:
         cfg.maxBytesPerSec = 64 * 1024;          // teto baixo, mas download deve terminar
         DownloadManager mgr(cfg, dir.path());
         const QUuid id = mgr.addDownload(srv.url("/ranged"), dest);
-        DownloadTask* t = mgr.taskById(id);
+        AbstractTask* t = mgr.taskById(id);
         QVERIFY(t);
         QTRY_COMPARE_WITH_TIMEOUT(t->state(), DownloadState::Completed, 20000);
         QFile f(dest); QVERIFY(f.open(QIODevice::ReadOnly));
@@ -1148,7 +1151,7 @@ private slots:
         QVERIFY(mgr.moveFiles(id, dest2));
         QVERIFY(!QFile::exists(dir + "/movie.bin"));            // saiu da origem
         QVERIFY(QFile::exists(dest2 + "/movie.bin"));           // chegou ao destino
-        QCOMPARE(mgr.taskById(id)->record().destPath, dest2 + "/movie.bin");
+        QCOMPARE(qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath, dest2 + "/movie.bin");
     }
 
     // Mover para a MESMA pasta é no-op: não pode renomear para "movie (1).bin".
@@ -1161,7 +1164,7 @@ private slots:
         const QUuid id = mgr.addDownload(srv.url("/ranged"), dir + "/movie.bin");
         QVERIFY(waitForState(mgr, id, DownloadState::Completed, 5000));
         QVERIFY(mgr.moveFiles(id, dir));                        // mesma pasta
-        QCOMPARE(mgr.taskById(id)->record().destPath, dir + "/movie.bin");  // nome intacto
+        QCOMPARE(qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath, dir + "/movie.bin");  // nome intacto
         QVERIFY(QFile::exists(dir + "/movie.bin"));
         QVERIFY(!QFile::exists(dir + "/movie (1).bin"));        // não duplicou
     }
@@ -1246,7 +1249,7 @@ private slots:
         const QUuid id = mgr.addDownload(srv.url("/named"), dir.filePath("download"),
                                          HeaderList{}, /*provisionalName=*/true);
         QVERIFY(waitForState(mgr, id, DownloadState::Completed, 5000));
-        QCOMPARE(QFileInfo(mgr.taskById(id)->record().destPath).fileName(),
+        QCOMPARE(QFileInfo(qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath).fileName(),
                  QString("Audiobook.m4a"));
         QVERIFY(QFile::exists(dir.filePath("Audiobook.m4a")));
     }
@@ -1261,7 +1264,7 @@ private slots:
         QTemporaryDir dir2;
         const QString newPath = QDir(dir2.path()).filePath("renamed.bin");
         QVERIFY(mgr.retarget(id, newPath));
-        QCOMPARE(mgr.taskById(id)->record().destPath, newPath);
+        QCOMPARE(qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath, newPath);
         QVERIFY(QFile::exists(newPath));
         QVERIFY(!QFile::exists(dir.filePath("orig.bin")));
         QFile f(newPath); QVERIFY(f.open(QIODevice::ReadOnly));
@@ -1276,7 +1279,7 @@ private slots:
         const QUuid id = mgr.addDownload(srv.url("/ranged"), p);
         QVERIFY(waitForState(mgr, id, DownloadState::Completed, 5000));
         QVERIFY(mgr.retarget(id, p));                       // same path -> true, undisturbed
-        QCOMPARE(mgr.taskById(id)->record().destPath, p);
+        QCOMPARE(qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath, p);
         QVERIFY(QFile::exists(p));
     }
     void retargetResolvesUniqueOnCollision() {
@@ -1290,7 +1293,7 @@ private slots:
         const QString taken = QDir(dir2.path()).filePath("b.bin");
         { QFile pre(taken); QVERIFY(pre.open(QIODevice::WriteOnly)); pre.write("x"); }
         QVERIFY(mgr.retarget(id, taken));                   // collides -> "b (1).bin"
-        const QString got = mgr.taskById(id)->record().destPath;
+        const QString got = qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath;
         QVERIFY(got != taken);
         QVERIFY(QFile::exists(got));
     }
@@ -1307,7 +1310,7 @@ private slots:
         const QString newPath = QDir(dir2.path()).filePath("moved.bin");
         QVERIFY(mgr.retarget(id, newPath));                 // pauses, moves partial+.meta, resumes
         QVERIFY(waitForState(mgr, id, DownloadState::Completed, 10000));
-        QCOMPARE(mgr.taskById(id)->record().destPath, newPath);
+        QCOMPARE(qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath, newPath);
         QFile f(newPath); QVERIFY(f.open(QIODevice::ReadOnly));
         QCOMPARE(f.readAll(), big);
         QVERIFY(!QFile::exists(dir.filePath("live.bin")));
@@ -1323,7 +1326,7 @@ private slots:
         const QUuid id = mgr.addDownload(srv.url("/named"), dir.filePath("myname.bin"),
                                          HeaderList{}, /*provisionalName=*/false);
         QVERIFY(waitForState(mgr, id, DownloadState::Completed, 5000));
-        QCOMPARE(QFileInfo(mgr.taskById(id)->record().destPath).fileName(),
+        QCOMPARE(QFileInfo(qobject_cast<DownloadTask*>(mgr.taskById(id))->record().destPath).fileName(),
                  QString("myname.bin"));
     }
 
@@ -1339,6 +1342,26 @@ private slots:
         const QString logContent = readFile(logger.taskLogPath(id, dir + "/movie.bin"));
         QVERIFY(logContent.contains("Downloading"));    // logou a transição
         QVERIFY(logContent.contains("Completed"));
+    }
+
+    // --- Task 6: AbstractTask base --------------------------------------
+
+    // DownloadTask must be fully usable through the AbstractTask base
+    // pointer: kind()/id()/state() are pure virtuals AbstractTask declares
+    // and DownloadTask implements. No helper named makeHttpTask() exists in
+    // this file (the brief assumed one); constructed the same way every
+    // other DownloadTask-level test here does.
+    void downloadTaskIsAnAbstractTask() {
+        QNetworkAccessManager nam;
+        EngineConfig cfg;
+        HttpTransport tr(&nam);
+        DownloadTask task(&tr, cfg);
+        task.init(QUuid::createUuid(), QUrl("http://example.invalid/f.bin"),
+                  QDir::tempPath() + "/orbit_abstracttask_test.bin", 4);
+        AbstractTask* t = &task;
+        QCOMPARE(t->kind(), AbstractTask::Kind::Http);
+        QVERIFY(!t->id().isNull());
+        QCOMPARE(t->state(), DownloadState::Queued);
     }
 };
 
