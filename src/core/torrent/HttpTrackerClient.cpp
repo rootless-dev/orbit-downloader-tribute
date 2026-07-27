@@ -1,6 +1,7 @@
 #include "torrent/HttpTrackerClient.h"
 
 #include "torrent/Bencode.h"
+#include "torrent/TrackerPeers.h"
 
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -80,55 +81,37 @@ bool TrackerProto::parseResponse(const QByteArray& body, QVector<PeerAddress>* p
     if (interval) *interval = root.contains("interval") ? int(root[QByteArray("interval")].toInt()) : 0;
     if (minInterval)
         *minInterval = root.contains("min interval") ? int(root[QByteArray("min interval")].toInt()) : 0;
-    if (peers) peers->clear();
-
-    if (root.contains("peers")) {
-        const BencodeValue& peersValue = root[QByteArray("peers")];
-        if (peersValue.type() == BencodeValue::Type::Bytes) {
-            // Compact form: 6 bytes per peer (4-byte big-endian IPv4 + 2-byte
-            // big-endian port).
-            const QByteArray raw = peersValue.toBytes();
-            // `i + 6 <= raw.size()` intentionally ignores any trailing partial
-            // (<6 byte) record from a malformed tracker, rather than erroring
-            // (lenient parsing).
-            for (int i = 0; i + 6 <= raw.size(); i += 6) {
-                const quint8 a = quint8(raw[i]);
-                const quint8 b = quint8(raw[i + 1]);
-                const quint8 c = quint8(raw[i + 2]);
-                const quint8 d = quint8(raw[i + 3]);
-                const quint16 port = quint16((quint8(raw[i + 4]) << 8) | quint8(raw[i + 5]));
-                const QString host = QStringLiteral("%1.%2.%3.%4").arg(a).arg(b).arg(c).arg(d);
-                if (peers) peers->append(PeerAddress{host, port});
-            }
-        } else if (peersValue.type() == BencodeValue::Type::List) {
-            // Dictionary form: a list of { ip, peer id, port } dicts.
-            for (const BencodeValue& entry : peersValue.toList()) {
-                if (entry.type() != BencodeValue::Type::Dict) continue;
-                const QString host = entry.contains("ip")
-                    ? QString::fromUtf8(entry[QByteArray("ip")].toBytes())
-                    : QString();
-                const quint16 port = entry.contains("port")
-                    ? quint16(entry[QByteArray("port")].toInt())
-                    : 0;
-                if (peers) peers->append(PeerAddress{host, port});
+    if (peers) {
+        peers->clear();
+        if (root.contains("peers")) {
+            const BencodeValue& pv = root[QByteArray("peers")];
+            if (pv.type() == BencodeValue::Type::Bytes) {
+                *peers += TrackerPeers::fromCompactV4(pv.toBytes());
+            } else if (pv.type() == BencodeValue::Type::List) {
+                for (const BencodeValue& entry : pv.toList()) {
+                    if (entry.type() != BencodeValue::Type::Dict) continue;
+                    const QString host = entry.contains("ip")
+                        ? QString::fromUtf8(entry[QByteArray("ip")].toBytes()) : QString();
+                    const quint16 port = entry.contains("port")
+                        ? quint16(entry[QByteArray("port")].toInt()) : 0;
+                    peers->append(PeerAddress{host, port});
+                }
             }
         }
+        if (root.contains("peers6") && root[QByteArray("peers6")].type() == BencodeValue::Type::Bytes)
+            *peers += TrackerPeers::fromCompactV6(root[QByteArray("peers6")].toBytes());
+        TrackerPeers::dropBogons(*peers);
     }
 
     return true;
 }
 
-HttpTrackerClient::HttpTrackerClient(QNetworkAccessManager* nam, QObject* parent)
-    : QObject(parent), m_nam(nam) {}
+HttpTrackerClient::HttpTrackerClient(QNetworkAccessManager* nam, const QUrl& tracker, QObject* parent)
+    : ITrackerClient(parent), m_nam(nam), m_tracker(tracker) {}
 
-void HttpTrackerClient::announce(const QUrl& tracker, const QByteArray& infoHash, const QByteArray& peerId,
+void HttpTrackerClient::announce(const QByteArray& infoHash, const QByteArray& peerId,
                                   quint16 port, qint64 downloaded, qint64 left, TrackerEvent ev) {
-    if (tracker.scheme() == QLatin1String("udp")) {
-        emit announceFailed(QStringLiteral("tracker uses UDP — supported in a later version"));
-        return;
-    }
-
-    const QUrl url = TrackerProto::buildAnnounceUrl(tracker, infoHash, peerId, port, downloaded, left, ev);
+    const QUrl url = TrackerProto::buildAnnounceUrl(m_tracker, infoHash, peerId, port, downloaded, left, ev);
     QNetworkReply* reply = m_nam->get(QNetworkRequest(url));
     // Reply cleanup must not depend on `this` (the client) still being alive: connect
     // it with `reply` itself as the context, so the reply always deletes itself on

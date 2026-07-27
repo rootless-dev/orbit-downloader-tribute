@@ -1,6 +1,7 @@
 #include "torrent/TorrentTask.h"
 
 #include "Logger.h"
+#include "torrent/AnnounceController.h"
 #include "torrent/PeerConnection.h"
 #include "torrent/PieceStore.h"
 
@@ -214,10 +215,10 @@ bool TorrentTask::haveAllWanted() const { return m_wantedHaveCount >= m_wanted.s
 void TorrentTask::beginLeeching() {
     setState(DownloadState::Connecting);
 
-    if (m_nam && !m_meta.announce.isEmpty()) {
-        if (!m_tracker) {
-            m_tracker = new HttpTrackerClient(m_nam, this);
-            connect(m_tracker, &HttpTrackerClient::peersReceived, this,
+    if (!m_meta.announceList.isEmpty()) {
+        if (!m_announce) {
+            m_announce = new AnnounceController(m_meta.announceList, m_nam, m_rngSeed, this);
+            connect(m_announce, &AnnounceController::peersReceived, this,
                     [this](QVector<PeerAddress> peers, int interval, int minInterval) {
                         int newCount = 0;
                         for (const auto& p : peers) {
@@ -238,7 +239,7 @@ void TorrentTask::beginLeeching() {
                         rescheduleAnnounceTimer();
                         openPeers();
                     });
-            connect(m_tracker, &HttpTrackerClient::announceFailed, this,
+            connect(m_announce, &AnnounceController::announceFailed, this,
                     [this](const QString& why) {
                         m_trackerStatus = QStringLiteral("failed: %1").arg(why);
                         logLine(LogLevel::Warn, QStringLiteral("announce failed: %1").arg(why));
@@ -247,16 +248,18 @@ void TorrentTask::beginLeeching() {
         }
         const qint64 left = m_totalWantedBytes - m_verifiedBytes;
         m_trackerStatus = QStringLiteral("announcing…");
-        m_tracker->announce(m_meta.announce, m_meta.infoHash, m_peerId, m_listenPort,
-                            m_verifiedBytes, left, TrackerEvent::Started);
+        m_announce->announce(m_meta.infoHash, m_peerId, m_listenPort, m_verifiedBytes, left,
+                             TrackerEvent::Started, /*hungry*/false);
 
         if (!m_announceTimer) {
             m_announceTimer = new QTimer(this);
             connect(m_announceTimer, &QTimer::timeout, this, [this] {
-                if (!m_tracker) return;
+                if (!m_announce) return;
                 const qint64 left = m_totalWantedBytes - m_verifiedBytes;
-                m_tracker->announce(m_meta.announce, m_meta.infoHash, m_peerId, m_listenPort,
-                                    m_verifiedBytes, left, TrackerEvent::None);
+                // Hungry when peer-starved: widen to every tracker to refill fast.
+                const bool hungry = (connectedPeerCount() == 0);
+                m_announce->announce(m_meta.infoHash, m_peerId, m_listenPort, m_verifiedBytes, left,
+                                     TrackerEvent::None, hungry);
             });
         }
         rescheduleAnnounceTimer(); // starved-by-default cadence until the first response lands
@@ -492,9 +495,9 @@ void TorrentTask::setPieceState(int piece, PieceState st) {
 void TorrentTask::maybeFinish() {
     if (!haveAllWanted()) return;
 
-    if (m_tracker && m_nam && !m_meta.announce.isEmpty()) {
-        m_tracker->announce(m_meta.announce, m_meta.infoHash, m_peerId, m_listenPort,
-                            m_verifiedBytes, 0, TrackerEvent::Completed);
+    if (m_announce) {
+        m_announce->announce(m_meta.infoHash, m_peerId, m_listenPort, m_verifiedBytes, 0,
+                             TrackerEvent::Completed, false);
     }
     if (m_announceTimer) m_announceTimer->stop();
     if (m_heartbeatTimer) m_heartbeatTimer->stop();
@@ -510,10 +513,10 @@ void TorrentTask::maybeFinish() {
 // ---------------------------------------------------------------------------
 
 void TorrentTask::pause() {
-    if (m_tracker && m_nam && !m_meta.announce.isEmpty()) {
+    if (m_announce) {
         const qint64 left = m_totalWantedBytes - m_verifiedBytes;
-        m_tracker->announce(m_meta.announce, m_meta.infoHash, m_peerId, m_listenPort,
-                            m_verifiedBytes, left, TrackerEvent::Stopped);
+        m_announce->announce(m_meta.infoHash, m_peerId, m_listenPort, m_verifiedBytes, left,
+                             TrackerEvent::Stopped, false);
     }
     if (m_announceTimer) m_announceTimer->stop();
     if (m_heartbeatTimer) m_heartbeatTimer->stop();
@@ -531,10 +534,10 @@ void TorrentTask::requeue() {
 }
 
 void TorrentTask::cancel() {
-    if (m_tracker && m_nam && !m_meta.announce.isEmpty()) {
-        m_tracker->announce(m_meta.announce, m_meta.infoHash, m_peerId, m_listenPort,
-                            m_verifiedBytes, m_totalWantedBytes - m_verifiedBytes,
-                            TrackerEvent::Stopped);
+    if (m_announce) {
+        const qint64 left = m_totalWantedBytes - m_verifiedBytes;
+        m_announce->announce(m_meta.infoHash, m_peerId, m_listenPort, m_verifiedBytes, left,
+                             TrackerEvent::Stopped, false);
     }
     if (m_announceTimer) m_announceTimer->stop();
     if (m_heartbeatTimer) m_heartbeatTimer->stop();

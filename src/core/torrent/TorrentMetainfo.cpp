@@ -198,6 +198,26 @@ TorrentMetainfo TorrentMetainfo::parse(const QByteArray& torrentBytes, bool* ok,
     }
     m.announce = QUrl(QString::fromUtf8(root[QByteArray("announce")].toBytes()));
 
+    // BEP 12 announce-list: a list of tiers, each tier a list of tracker URL
+    // byte-strings. Skip malformed entries/empty tiers. When absent or empty,
+    // synthesize a single tier holding the plain `announce` URL so downstream
+    // code always sees a uniform tier structure.
+    if (root.contains(QByteArray("announce-list")) &&
+        root[QByteArray("announce-list")].type() == BencodeValue::Type::List) {
+        for (const BencodeValue& tierVal : root[QByteArray("announce-list")].toList()) {
+            if (tierVal.type() != BencodeValue::Type::List) continue;
+            QVector<QUrl> tier;
+            for (const BencodeValue& urlVal : tierVal.toList()) {
+                if (urlVal.type() != BencodeValue::Type::Bytes) continue;
+                const QUrl u(QString::fromUtf8(urlVal.toBytes()));
+                if (u.isValid() && !u.scheme().isEmpty()) tier.append(u);
+            }
+            if (!tier.isEmpty()) m.announceList.append(tier);
+        }
+    }
+    if (m.announceList.isEmpty() && m.announce.isValid() && !m.announce.scheme().isEmpty())
+        m.announceList.append(QVector<QUrl>{m.announce});
+
     if (ok) *ok = true;
     return m;
 }

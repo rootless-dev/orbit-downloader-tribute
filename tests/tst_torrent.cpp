@@ -1,9 +1,11 @@
 #include <QtTest>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QCryptographicHash>
 #include <QNetworkAccessManager>
 #include <QFile>
 #include <QDir>
+#include <QUrl>
 #include <QUuid>
 
 #include "torrent/TorrentTask.h"
@@ -11,6 +13,7 @@
 #include "torrent/Bencode.h"
 #include "RateLimiter.h"
 #include "TestSeeder.h"
+#include "TestUdpTracker.h"
 #include "DownloadManager.h"
 
 namespace {
@@ -180,6 +183,57 @@ private slots:
         QCOMPARE(t.receivedBytes(), t.totalBytes());
     }
 
+    // End-to-end proof of the full Sub-phase B tracker path: peers are NOT
+    // injected via addPeerForTest. Instead, the torrent's announce-list points
+    // at a local in-process UDP tracker (TestUdpTracker), which the real
+    // AnnounceController -> UdpTrackerClient path must contact to learn about
+    // the seeder. Mirrors downloadsMultiBlockPieces' fixture (same payload
+    // shape, same multi-block piece length so the picker's multi-block path
+    // stays covered) but swaps addPeerForTest for a real tracker round-trip.
+    //
+    // Loopback seam: TrackerPeers::dropBogons() strips 127.0.0.0/8 by design
+    // (a real tracker reporting a loopback peer is malicious or broken), but
+    // this offline E2E's only dialable peer -- TestSeeder -- binds to
+    // 127.0.0.1. ORBIT_ALLOW_LOOPBACK_PEERS (see TrackerPeers.{h,cpp}) is a
+    // test-only env-var seam that keeps loopback peers ONLY when set; it is
+    // set for the duration of this slot only, so production behavior (and
+    // every other test in this suite) is unaffected. See
+    // .superpowers/sdd/task-8-report.md for the original root-cause writeup.
+    void e2e_downloadsThroughUdpTracker() {
+        qputenv("ORBIT_ALLOW_LOOPBACK_PEERS", "1");
+        // Scope guard: guarantees the env var never leaks into other slots,
+        // even if a QVERIFY/QCOMPARE/QTRY_* above fails and returns early.
+        auto unsetGuard = qScopeGuard([] { qunsetenv("ORBIT_ALLOW_LOOPBACK_PEERS"); });
+        const qint64 pl = 16 * 16384;                      // 262144: 16 blocks/piece (> pipeline depth 8)
+        const QByteArray data = makeData(int(2 * pl + 40000)); // 2 full pieces + short last (3 blocks, last partial)
+        auto m = singleMeta(data, pl);
+        QCOMPARE(m.pieceHashes.size(), 3);                 // 2 full + 1 short (40000 bytes)
+
+        // 1) Stand up the in-process seeder for this exact payload.
+        TestSeeder seeder(m.infoHash, data, pl);
+        const quint16 seederPort = seeder.port();
+
+        // 2) Stand up the UDP tracker returning the seeder as the only peer.
+        TestUdpTracker tracker;
+        tracker.setPeers({{QStringLiteral("127.0.0.1"), seederPort}});
+
+        // 3) Point the torrent's announce-list at the local UDP tracker ONLY
+        //    -- the only way to discover the seeder is through the real
+        //    AnnounceController -> UdpTrackerClient path.
+        m.announce = QUrl();
+        m.announceList = {{QUrl(QStringLiteral("udp://127.0.0.1:%1").arg(tracker.port()))}};
+
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QNetworkAccessManager nam; RateLimiter rl;
+        TorrentTask t(m, dir.path(), allFiles(m), PieceStrategy::Sequential, 6881, 50,
+                      ResumeVerifyMode::TrustBitfield, 1, &nam, &rl, nullptr, dir.path());
+        t.start();
+        QTRY_VERIFY_WITH_TIMEOUT(t.state() == DownloadState::Completed, 15000);
+        QCOMPARE(readFile(QDir(dir.path()).filePath(m.name)), data);
+        QCOMPARE(t.receivedBytes(), t.totalBytes());
+        qunsetenv("ORBIT_ALLOW_LOOPBACK_PEERS");
+    }
+
     void nextAnnounceDelaySecsAdaptsToPeerHealth() {
         // Starved: 0 peers, no progress -> aggressive re-announce, bounded [30,90].
         // No min interval (0) reproduces the old, pre-fast-follow behavior.
@@ -225,6 +279,24 @@ private slots:
         // tracker interval still wins verbatim; the min-interval floor only
         // matters for the aggressive/starved branch.
         QCOMPARE(TorrentTask::nextAnnounceDelaySecsForTest(4, true, 1800, 300), 1800);
+    }
+
+    // Wiring smoke test (Task 7): a torrent with a two-tier BEP-12
+    // announceList must construct/drive an AnnounceController without
+    // crashing or hanging, even though neither tracker is reachable (both
+    // point at closed loopback ports). No peers will arrive; the point is
+    // that the controller path is exercised end-to-end from start().
+    void multiTracker_startsAndAnnouncesWithoutCrash() {
+        const QByteArray data = makeData(16384); // 1 piece
+        auto m = singleMeta(data, 16384);
+        m.announceList = {{QUrl(QStringLiteral("udp://127.0.0.1:1"))},
+                           {QUrl(QStringLiteral("http://127.0.0.1:1/announce"))}};
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QNetworkAccessManager nam; RateLimiter rl;
+        TorrentTask t(m, dir.path(), allFiles(m), PieceStrategy::Sequential, 6881, 50,
+                      ResumeVerifyMode::TrustBitfield, 1, &nam, &rl, nullptr, dir.path());
+        t.start();
+        QTRY_VERIFY(t.state() == DownloadState::Connecting || t.state() == DownloadState::Checking);
     }
 
     void downloadsMultiFileWithSelection() {

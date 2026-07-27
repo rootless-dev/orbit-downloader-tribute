@@ -58,6 +58,32 @@ static QByteArray singleFileNonCanonical(qint64 len, qint64 pieceLen, const QByt
     return root;
 }
 
+// helper: build a minimal single-file .torrent with an explicit BEP 12
+// "announce-list" (a list of tiers, each tier a list of tracker URL strings).
+static QByteArray singleFileWithAnnounceList(qint64 len, qint64 pieceLen, const QByteArray& pieces,
+                                              const QVector<QVector<QByteArray>>& tiers) {
+    QMap<QByteArray, BencodeValue> info;
+    info.insert("length", BencodeValue::makeInt(len));
+    info.insert("name", BencodeValue::makeBytes("file"));
+    info.insert("piece length", BencodeValue::makeInt(pieceLen));
+    info.insert("pieces", BencodeValue::makeBytes(pieces));
+
+    QList<BencodeValue> tierList;
+    for (const auto& tier : tiers) {
+        QList<BencodeValue> urlList;
+        for (const auto& url : tier)
+            urlList.append(BencodeValue::makeBytes(url));
+        tierList.append(BencodeValue::makeList(urlList));
+    }
+
+    QMap<QByteArray, BencodeValue> root;
+    root.insert("announce", BencodeValue::makeBytes("http://tracker.example/announce"));
+    root.insert("announce-list", BencodeValue::makeList(tierList));
+    root.insert("info", BencodeValue::makeDict(info));
+
+    return Bencode::encode(BencodeValue::makeDict(root));
+}
+
 // helper: build a minimal multi-file .torrent with the given piece hashes
 static QByteArray multiFile(const QVector<QPair<QString, qint64>>& fileSpecs,
                              qint64 pieceLen, const QByteArray& pieces) {
@@ -194,6 +220,31 @@ private slots:
         QVector<QPair<QString, qint64>> specs = { {"..", 30}, {"b.txt", 70} };
         auto bytes = multiFile(specs, /*pieceLen*/100, pieces);
         bool ok=true; TorrentMetainfo::parse(bytes, &ok); QVERIFY(!ok);
+    }
+    void announceList_parsedIntoTiers() {
+        QByteArray pieces(20, '\x11'); // one piece hash
+        QVector<QVector<QByteArray>> tiers = {
+            { "http://primary/annou" },
+            { "udp://backup.example:9" },
+        };
+        auto bytes = singleFileWithAnnounceList(/*len*/100, /*pieceLen*/100, pieces, tiers);
+        bool ok = false; QString err;
+        const TorrentMetainfo m = TorrentMetainfo::parse(bytes, &ok, &err);
+        QVERIFY2(ok, qPrintable(err));
+        QCOMPARE(m.announceList.size(), 2);              // two tiers
+        QCOMPARE(m.announceList[0].size(), 1);
+        QCOMPARE(m.announceList[0][0], QUrl("http://primary/annou"));
+        QCOMPARE(m.announceList[1][0], QUrl("udp://backup.example:9"));
+    }
+    void announceList_absent_fallsBackToAnnounce() {
+        QByteArray pieces(20, '\x11'); // one piece hash
+        auto bytes = singleFile(/*len*/100, /*pieceLen*/100, pieces);
+        bool ok = false; QString err;
+        const TorrentMetainfo m = TorrentMetainfo::parse(bytes, &ok, &err);
+        QVERIFY2(ok, qPrintable(err));
+        QCOMPARE(m.announceList.size(), 1);
+        QCOMPARE(m.announceList[0].size(), 1);
+        QCOMPARE(m.announceList[0][0], QUrl("http://tracker.example/announce"));
     }
 };
 QTEST_MAIN(TstMetainfo)

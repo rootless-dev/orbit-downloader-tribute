@@ -3,7 +3,7 @@
 #include "AbstractTask.h"
 #include "DownloadTypes.h"
 #include "torrent/Bitfield.h"
-#include "torrent/HttpTrackerClient.h" // PeerAddress
+#include "torrent/TrackerTypes.h" // PeerAddress
 #include "torrent/PiecePicker.h"       // BlockRequest
 #include "torrent/TorrentMetainfo.h"
 
@@ -23,6 +23,7 @@ class Logger;
 enum class LogLevel;
 class PieceStore;
 class PeerConnection;
+class AnnounceController;
 
 // Task 10: the BitTorrent leech engine.
 //
@@ -147,7 +148,7 @@ private:
     int                          m_pieceCount = 0;
     std::unique_ptr<PieceStore>  m_store;   // owned
     std::unique_ptr<PiecePicker> m_picker;  // owned
-    HttpTrackerClient*           m_tracker = nullptr; // owned (QObject child)
+    AnnounceController*          m_announce = nullptr; // owned (QObject child)
     Bitfield                     m_have;
     QSet<int>                    m_wanted;
     int                          m_wantedHaveCount = 0;

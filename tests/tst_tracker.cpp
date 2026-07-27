@@ -11,10 +11,12 @@
 
 namespace {
 
-// 127.0.0.1:6881 -> 7F 00 00 01 1A E1 ; 10.0.0.5:80 -> 0A 00 00 05 00 50
+// 1.2.3.4:6881 -> 01 02 03 04 1A E1 ; 10.0.0.5:80 -> 0A 00 00 05 00 50
+// (Not 127.0.0.1: TrackerPeers::dropBogons() now filters loopback addresses,
+// so a real-looking public IP is used here instead.)
 QByteArray compactPeerBytes() {
     QByteArray raw;
-    raw.append(char(0x7F)); raw.append(char(0x00)); raw.append(char(0x00)); raw.append(char(0x01));
+    raw.append(char(0x01)); raw.append(char(0x02)); raw.append(char(0x03)); raw.append(char(0x04));
     raw.append(char(0x1A)); raw.append(char(0xE1));
     raw.append(char(0x0A)); raw.append(char(0x00)); raw.append(char(0x00)); raw.append(char(0x05));
     raw.append(char(0x00)); raw.append(char(0x50));
@@ -88,7 +90,7 @@ private slots:
         QString fail;
         QVERIFY(TrackerProto::parseResponse(body, &peers, &iv, &minIv, &fail));
         QCOMPARE(peers.size(), 2);
-        QCOMPARE(peers[0].host, QString("127.0.0.1"));
+        QCOMPARE(peers[0].host, QString("1.2.3.4"));
         QCOMPARE(peers[0].port, quint16(6881));
         QCOMPARE(peers[1].host, QString("10.0.0.5"));
         QCOMPARE(peers[1].port, quint16(80));
@@ -154,12 +156,12 @@ private slots:
         const quint16 serverPort = tcp.serverPort();
 
         QNetworkAccessManager nam;
-        HttpTrackerClient client(&nam);
+        const QUrl tracker(QString("http://127.0.0.1:%1/announce").arg(serverPort));
+        HttpTrackerClient client(&nam, tracker);
         QSignalSpy peersSpy(&client, &HttpTrackerClient::peersReceived);
         QSignalSpy failedSpy(&client, &HttpTrackerClient::announceFailed);
 
-        const QUrl tracker(QString("http://127.0.0.1:%1/announce").arg(serverPort));
-        client.announce(tracker, QByteArray(20, 'h'), "-OB0001-abcdefghij", 6881, 0, 100, TrackerEvent::Started);
+        client.announce(QByteArray(20, 'h'), "-OB0001-abcdefghij", 6881, 0, 100, TrackerEvent::Started);
 
         QVERIFY(peersSpy.wait(2000));
         QCOMPARE(failedSpy.count(), 0);
@@ -168,21 +170,12 @@ private slots:
         const int interval = peersSpy.at(0).at(1).toInt();
         const int minInterval = peersSpy.at(0).at(2).toInt();
         QCOMPARE(peers.size(), 2);
-        QCOMPARE(peers[0].host, QString("127.0.0.1"));
+        QCOMPARE(peers[0].host, QString("1.2.3.4"));
         QCOMPARE(peers[0].port, quint16(6881));
         QCOMPARE(interval, 1800);
         QCOMPARE(minInterval, 0); // this canned response doesn't send one
     }
 
-    void udpTrackerFailsSynchronously() {
-        QNetworkAccessManager nam;
-        HttpTrackerClient client(&nam);
-        QSignalSpy failedSpy(&client, &HttpTrackerClient::announceFailed);
-        client.announce(QUrl("udp://tracker.example:80/announce"), QByteArray(20, 'h'),
-                         "-OB0001-abcdefghij", 6881, 0, 100, TrackerEvent::Started);
-        QCOMPARE(failedSpy.count(), 1);
-        QCOMPARE(failedSpy.at(0).at(0).toString(), QString("tracker uses UDP — supported in a later version"));
-    }
 };
 
 QTEST_MAIN(TstTracker)

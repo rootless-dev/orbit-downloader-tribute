@@ -20,13 +20,19 @@ add_library(orbitcore STATIC
   Logger.cpp
   torrent/Bencode.cpp
   torrent/TorrentMetainfo.cpp
+  torrent/TrackerPeers.cpp
   torrent/Bitfield.cpp
   torrent/PieceStore.cpp
   torrent/PiecePicker.cpp
+  torrent/ITrackerClient.h
   torrent/HttpTrackerClient.cpp
+  torrent/UdpTrackerClient.h
+  torrent/UdpTrackerClient.cpp
   torrent/PeerWire.cpp
   torrent/PeerConnection.cpp
   torrent/TorrentTask.cpp
+  torrent/AnnounceController.h
+  torrent/AnnounceController.cpp
 )
 set_target_properties(orbitcore PROPERTIES LINKER_LANGUAGE CXX)
 target_include_directories(orbitcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

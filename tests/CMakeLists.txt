@@ -87,6 +87,10 @@ add_executable(tst_tracker tst_tracker.cpp)
 target_link_libraries(tst_tracker PRIVATE orbitcore Qt6::Test Qt6::Network Qt6::HttpServer)
 add_test(NAME tst_tracker COMMAND tst_tracker)
 
+add_executable(tst_trackerpeers tst_trackerpeers.cpp)
+target_link_libraries(tst_trackerpeers PRIVATE orbitcore Qt6::Test Qt6::Network)
+add_test(NAME tst_trackerpeers COMMAND tst_trackerpeers)
+
 add_executable(tst_peerwire tst_peerwire.cpp)
 target_link_libraries(tst_peerwire PRIVATE orbitcore Qt6::Test Qt6::Network)
 add_test(NAME tst_peerwire COMMAND tst_peerwire)
@@ -95,6 +99,14 @@ add_executable(tst_seeder tst_seeder.cpp TestSeeder.cpp)
 target_link_libraries(tst_seeder PRIVATE orbitcore Qt6::Test Qt6::Network)
 add_test(NAME tst_seeder COMMAND tst_seeder)
 
-add_executable(tst_torrent tst_torrent.cpp TestSeeder.cpp)
+add_executable(tst_torrent tst_torrent.cpp TestSeeder.cpp TestUdpTracker.cpp)
 target_link_libraries(tst_torrent PRIVATE orbitcore Qt6::Test Qt6::Network)
 add_test(NAME tst_torrent COMMAND tst_torrent)
+
+add_executable(tst_udptracker tst_udptracker.cpp TestUdpTracker.cpp)
+target_link_libraries(tst_udptracker PRIVATE orbitcore Qt6::Test Qt6::Network)
+add_test(NAME tst_udptracker COMMAND tst_udptracker)
+
+add_executable(tst_announcecontroller tst_announcecontroller.cpp)
+target_link_libraries(tst_announcecontroller PRIVATE orbitcore Qt6::Test Qt6::Network)
+add_test(NAME tst_announcecontroller COMMAND tst_announcecontroller)

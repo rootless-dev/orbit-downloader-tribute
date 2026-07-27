@@ -25,6 +25,7 @@ struct TorrentMetainfo {
     qint64 totalLength = 0;
     QVector<FileEntry> files;         // >=1; offset is cumulative into the logical stream
     QUrl announce;
+    QVector<QVector<QUrl>> announceList; // BEP 12 tiers; [[announce]] when the key is absent
     bool isMultiFile = false;
 
     // Parses `torrentBytes` as a bencoded .torrent file. On success returns a
