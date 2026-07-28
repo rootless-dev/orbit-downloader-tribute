@@ -318,3 +318,40 @@ bytes and reproduce to decide A vs B before fixing (no fix without confirmed roo
 cause). This is distinct from the known DHT peer-discovery limitation (Ubuntu-style
 swarms need Sub-phase C for peer *count*); this bug concerns *using* a peer we
 already have.
+
+### 10.1 Root cause (2026-07-27) — the field finding was MISDIAGNOSED
+
+The original §10 hypothesis (a `<bitfield>` we fail to process) was **wrong**. It
+assumed, without measuring, that the Ubuntu seed sends a bitfield. Instrumenting
+`PeerConnection` (inbound message ids + peer reserved bytes) and then measuring the
+exact peer three independent ways established the truth:
+
+- **The seed sends no bitfield at all.** Wire trace of `185.125.190.59:6898` (both
+  from our instrumented client and from an independent reference client connecting
+  to the same peer): `reserved=0000000000000000`, then `unchoke`, then a single
+  `have` for one piece — **no `bitfield`, no `have_all`**. It is a super-seed
+  (initial-seeding): it hides its full bitfield and reveals one piece at a time, and
+  will not reveal more to a download-only client that does not upload/share.
+- **The Ubuntu tracker hands out exactly one peer.** A direct announce (`numwant=200`)
+  returns `complete:133` (133 seeds exist) but a single compact peer — the same
+  super-seed. Our tracker/compact-parsing code is correct; the tracker is stingy by
+  design.
+- **qBittorrent succeeds via DHT, not the wire.** It is a libtorrent frontend with
+  DHT enabled by default (status bar "DHT: 94 nodes" → 30 seeds). We have no DHT, so
+  the tracker's one super-seed is our only peer and we stall at 1 piece.
+
+So there is **no peer-wire bug** here (a normal swarm — a separate real torrent —
+downloads at 62 MiB/s). The blocker is a missing feature: **DHT peer discovery
+(Sub-phase C)**. Tracked accordingly; this section corrects §10.
+
+**Kept anyway (correct, not the field fix):** `have_all` (id 14) → full peer bitfield
+and `have_none` (id 15) → empty bitfield handling in `PeerConnection` (ids added to
+`PeerWire::MessageId`), with regression tests `tst_peerwire`
+(`haveAllAdvertisesFullBitfield`/`haveNoneAdvertisesEmptyBitfield`) and `tst_torrent`
+(`downloadsFromHaveAllSeed`, `downloadsWithFragmentedBitfield` framing guard). These
+are correct BEP 6 behavior for fast-extension seeds and were validated to fix the
+have_all *failure mode* offline — they simply do not apply to this non-fast-extension
+super-seed. Also kept: the `peerLog` wire-diagnostic instrumentation (reserved bytes,
+availability message type, unhandled ids, sparse haves) — it is what made this
+measurable. Suite 28/28. **Follow-up:** `reject_request` (id 16) still ignored
+(harmless without fast-extension negotiation).
