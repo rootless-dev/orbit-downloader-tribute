@@ -11,9 +11,11 @@
 #include "torrent/TorrentTask.h"
 #include "torrent/TorrentMetainfo.h"
 #include "torrent/Bencode.h"
+#include "torrent/DhtNode.h"
 #include "RateLimiter.h"
 #include "TestSeeder.h"
 #include "TestUdpTracker.h"
+#include "TestMetadataPeer.h"
 #include "DownloadManager.h"
 
 namespace {
@@ -36,10 +38,41 @@ void appendPieceHashes(TorrentMetainfo& m, const QByteArray& data) {
     }
 }
 
-// Single-file torrent over `data`. infoHash is arbitrary-but-stable 20 bytes;
-// only the piece hashes must be genuine SHA-1s of the data.
-TorrentMetainfo singleMeta(const QByteArray& data, qint64 pieceLen) {
-    TorrentMetainfo m;
+// Bencodes a minimal-but-valid single-file BEP3 info dict for `m` (piece
+// length/pieces/name/length only - no "files" list, no extra keys), key order
+// ascending (QMap<QByteArray,...> already sorts that way), which is exactly
+// canonical bencode dict order. Used by singleMeta() below so its `.infoHash`
+// is the REAL SHA-1 of `.infoDict`'s bytes - required for
+// magnetResolvesViaDhtThenDownloads, where TestMetadataPeer serves .infoDict
+// and PeerConnection's own ut_metadata fetch verifies its SHA-1 against the
+// magnet's requested info-hash before ever accepting it.
+QByteArray encodeSingleFileInfoDict(const TorrentMetainfo& m) {
+    QMap<QByteArray, BencodeValue> info;
+    info.insert("length", BencodeValue::makeInt(m.totalLength));
+    info.insert("name", BencodeValue::makeBytes(m.name.toUtf8()));
+    info.insert("piece length", BencodeValue::makeInt(m.pieceLength));
+    QByteArray pieces;
+    for (const QByteArray& h : m.pieceHashes) pieces += h;
+    info.insert("pieces", BencodeValue::makeBytes(pieces));
+    return Bencode::encode(BencodeValue::makeDict(info));
+}
+
+// singleMeta()'s return type: a TorrentMetainfo plus the raw bencoded info
+// dict bytes it was derived from (SHA1(infoDict) == infoHash) - needed by
+// magnetResolvesViaDhtThenDownloads to hand a TestMetadataPeer something to
+// serve. Public inheritance so every existing singleMeta() call site (which
+// only ever uses the TorrentMetainfo base-class fields) keeps compiling
+// unchanged.
+struct MetaFixture : TorrentMetainfo {
+    QByteArray infoDict;
+};
+
+// Single-file torrent over `data`. infoHash is the REAL SHA-1 of the encoded
+// info dict (infoDict) - required so a metadata peer serving that exact
+// infoDict for this infoHash passes PeerConnection's own SHA-1 verification;
+// the piece hashes are genuine SHA-1s of the data either way.
+MetaFixture singleMeta(const QByteArray& data, qint64 pieceLen) {
+    MetaFixture m;
     m.name = QStringLiteral("single.bin");
     m.pieceLength = pieceLen;
     m.totalLength = data.size();
@@ -47,7 +80,38 @@ TorrentMetainfo singleMeta(const QByteArray& data, qint64 pieceLen) {
     FileEntry f; f.path = m.name; f.length = data.size(); f.offset = 0;
     m.files = { f };
     appendPieceHashes(m, data);
-    m.infoHash = QCryptographicHash::hash(data + "single", QCryptographicHash::Sha1);
+    m.infoDict = encodeSingleFileInfoDict(m);
+    m.infoHash = QCryptographicHash::hash(m.infoDict, QCryptographicHash::Sha1);
+    return m;
+}
+
+// Regression fixture (Task 15 verbatim-cache fix): same shape as singleMeta(),
+// but the info dict also carries a "private" key (BEP 27) that
+// TorrentMetainfo::parse doesn't extract into any field. Used to prove
+// DownloadManager caches the RESOLVED magnet's .torrent from the verbatim
+// info-dict bytes (which preserve "private") rather than re-encoding from the
+// parsed TorrentMetainfo (which would silently drop it and re-derive a
+// DIFFERENT info-hash for the cached file).
+MetaFixture singleMetaWithPrivateFlag(const QByteArray& data, qint64 pieceLen) {
+    MetaFixture m;
+    m.name = QStringLiteral("single.bin");
+    m.pieceLength = pieceLen;
+    m.totalLength = data.size();
+    m.isMultiFile = false;
+    FileEntry f; f.path = m.name; f.length = data.size(); f.offset = 0;
+    m.files = { f };
+    appendPieceHashes(m, data);
+
+    QMap<QByteArray, BencodeValue> info;
+    info.insert("length", BencodeValue::makeInt(m.totalLength));
+    info.insert("name", BencodeValue::makeBytes(m.name.toUtf8()));
+    info.insert("piece length", BencodeValue::makeInt(m.pieceLength));
+    QByteArray pieces;
+    for (const QByteArray& h : m.pieceHashes) pieces += h;
+    info.insert("pieces", BencodeValue::makeBytes(pieces));
+    info.insert("private", BencodeValue::makeInt(1)); // unrecognized by TorrentMetainfo::parse
+    m.infoDict = Bencode::encode(BencodeValue::makeDict(info));
+    m.infoHash = QCryptographicHash::hash(m.infoDict, QCryptographicHash::Sha1);
     return m;
 }
 
@@ -125,11 +189,71 @@ QString writeTorrentFixture(const QString& dir, QString* hexInfoHashOut = nullpt
     return path;
 }
 
+// Like writeTorrentFixture(), but with GENUINE piece SHA-1s over `payload`
+// (writeTorrentFixture's "pieces" field is a fake, fixed 20-byte pattern --
+// fine for the metadata-only tests that never actually leech, but useless for
+// one that must download `payload` to completion and pass hash verification).
+// The returned infoHash is TorrentMetainfo::parse's real SHA-1-of-the-encoded-
+// info-dict, so it's exactly what a TestSeeder/DhtNode holder must be keyed on
+// for DownloadManager::addTorrent()'s own parse of this file to line up with
+// them end-to-end.
+QString writeRealTorrentFixture(const QString& dir, const QByteArray& payload, qint64 pieceLen,
+                                QByteArray* infoHashOut,
+                                const QString& fileName = QStringLiteral("real.torrent"),
+                                // TorrentMetainfo::parse requires a well-formed "announce" (spec
+                                // §parse), so a .torrent fixture can never omit it -- but a caller
+                                // whose test waits for the download to actually finish (spins the
+                                // event loop long enough for AnnounceController to fire) should NOT
+                                // default to a real, DNS-resolvable host: use a local, nothing's-
+                                // listening address (fails instantly, no outbound DNS/HTTP) instead.
+                                const QString& announce = QStringLiteral("http://tracker.example/announce")) {
+    QByteArray pieces;
+    const int pc = int((payload.size() + pieceLen - 1) / pieceLen);
+    for (int p = 0; p < pc; ++p) {
+        const qint64 off = qint64(p) * pieceLen;
+        const qint64 sz = qMin<qint64>(pieceLen, payload.size() - off);
+        pieces += QCryptographicHash::hash(payload.mid(off, sz), QCryptographicHash::Sha1);
+    }
+
+    QMap<QByteArray, BencodeValue> info;
+    info.insert("length", BencodeValue::makeInt(payload.size()));
+    info.insert("name", BencodeValue::makeBytes("single.bin"));
+    info.insert("piece length", BencodeValue::makeInt(pieceLen));
+    info.insert("pieces", BencodeValue::makeBytes(pieces));
+
+    QMap<QByteArray, BencodeValue> root;
+    root.insert("announce", BencodeValue::makeBytes(announce.toUtf8()));
+    root.insert("info", BencodeValue::makeDict(info));
+
+    const QByteArray infoBytes = Bencode::encode(BencodeValue::makeDict(info));
+    if (infoHashOut)
+        *infoHashOut = QCryptographicHash::hash(infoBytes, QCryptographicHash::Sha1);
+
+    const QByteArray bytes = Bencode::encode(BencodeValue::makeDict(root));
+    const QString path = dir + "/" + fileName;
+    writeBytes(path, bytes);
+    return path;
+}
+
 } // namespace
 
 class TstTorrent : public QObject {
     Q_OBJECT
 private slots:
+    // Suite-wide, not per-test: e2e_downloadsThroughUdpTracker and
+    // downloadsWithPeersFromDht both need these (loopback peers allowed;
+    // DhtNode/UdpTrackerClient's internal query timeouts shortened), and
+    // unlike a per-test qputenv/qScopeGuard pair, a shared env var set once
+    // here can't be un-set out from under a LATER test in the same process.
+    void initTestCase() {
+        qputenv("ORBIT_ALLOW_LOOPBACK_PEERS", "1");
+        qputenv("ORBIT_UDP_FAST_TIMEOUT", "1");
+    }
+    void cleanupTestCase() {
+        qunsetenv("ORBIT_ALLOW_LOOPBACK_PEERS");
+        qunsetenv("ORBIT_UDP_FAST_TIMEOUT");
+    }
+
     void downloadsSingleFileFromSeeder() {
         const QByteArray data = makeData(50000);         // 4 pieces @ 16384
         auto m = singleMeta(data, 16384);
@@ -183,6 +307,49 @@ private slots:
         QCOMPARE(t.receivedBytes(), t.totalBytes());
     }
 
+    // Regression for the field "stall against a remote seed" finding (spec
+    // 2026-07-24 §10, root-caused 2026-07-27). A seed that advertises via BEP 6
+    // <have_all> (id 14) instead of a <bitfield> frame: we never negotiate the
+    // fast extension, yet real seeds send have_all anyway. Before the fix id 14
+    // fell into PeerConnection's default: branch and was ignored, so the peer
+    // bitfield stayed empty, bitfieldReceived never fired, and PiecePicker
+    // starved -- the download stalled with a fully-available seed connected and
+    // unchoked. Must download to completion, byte-identical.
+    void downloadsFromHaveAllSeed() {
+        const QByteArray data = makeData(50000);         // 4 pieces @ 16384
+        auto m = singleMeta(data, 16384);
+        TestSeeder seeder(m.infoHash, data, 16384, TestSeeder::Advertise::HaveAll);
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QNetworkAccessManager nam; RateLimiter rl;
+        TorrentTask t(m, dir.path(), allFiles(m), PieceStrategy::RarestFirst, 6881, 50,
+                      ResumeVerifyMode::TrustBitfield, 1, &nam, &rl, nullptr, dir.path());
+        t.addPeerForTest({QStringLiteral("127.0.0.1"), seeder.port()});
+        t.start();
+        QTRY_VERIFY_WITH_TIMEOUT(t.state() == DownloadState::Completed, 10000);
+        QCOMPARE(readFile(QDir(dir.path()).filePath(m.name)), data);
+        QCOMPARE(t.receivedBytes(), t.totalBytes());
+    }
+
+    // Framing robustness guard (rules out the other field hypothesis): the
+    // <bitfield> frame arrives across two readyRead deliveries, as a >MTU
+    // bitfield does on a real network but never on loopback. PeerConnection must
+    // accumulate the partial frame in its member buffer and assemble it. Must
+    // download to completion.
+    void downloadsWithFragmentedBitfield() {
+        const QByteArray data = makeData(50000);         // 4 pieces @ 16384
+        auto m = singleMeta(data, 16384);
+        TestSeeder seeder(m.infoHash, data, 16384, TestSeeder::Advertise::FragmentedBitfield);
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QNetworkAccessManager nam; RateLimiter rl;
+        TorrentTask t(m, dir.path(), allFiles(m), PieceStrategy::RarestFirst, 6881, 50,
+                      ResumeVerifyMode::TrustBitfield, 1, &nam, &rl, nullptr, dir.path());
+        t.addPeerForTest({QStringLiteral("127.0.0.1"), seeder.port()});
+        t.start();
+        QTRY_VERIFY_WITH_TIMEOUT(t.state() == DownloadState::Completed, 10000);
+        QCOMPARE(readFile(QDir(dir.path()).filePath(m.name)), data);
+        QCOMPARE(t.receivedBytes(), t.totalBytes());
+    }
+
     // End-to-end proof of the full Sub-phase B tracker path: peers are NOT
     // injected via addPeerForTest. Instead, the torrent's announce-list points
     // at a local in-process UDP tracker (TestUdpTracker), which the real
@@ -195,15 +362,10 @@ private slots:
     // (a real tracker reporting a loopback peer is malicious or broken), but
     // this offline E2E's only dialable peer -- TestSeeder -- binds to
     // 127.0.0.1. ORBIT_ALLOW_LOOPBACK_PEERS (see TrackerPeers.{h,cpp}) is a
-    // test-only env-var seam that keeps loopback peers ONLY when set; it is
-    // set for the duration of this slot only, so production behavior (and
-    // every other test in this suite) is unaffected. See
+    // test-only env-var seam that keeps loopback peers ONLY when set;
+    // initTestCase() sets it for this whole suite. See
     // .superpowers/sdd/task-8-report.md for the original root-cause writeup.
     void e2e_downloadsThroughUdpTracker() {
-        qputenv("ORBIT_ALLOW_LOOPBACK_PEERS", "1");
-        // Scope guard: guarantees the env var never leaks into other slots,
-        // even if a QVERIFY/QCOMPARE/QTRY_* above fails and returns early.
-        auto unsetGuard = qScopeGuard([] { qunsetenv("ORBIT_ALLOW_LOOPBACK_PEERS"); });
         const qint64 pl = 16 * 16384;                      // 262144: 16 blocks/piece (> pipeline depth 8)
         const QByteArray data = makeData(int(2 * pl + 40000)); // 2 full pieces + short last (3 blocks, last partial)
         auto m = singleMeta(data, pl);
@@ -231,7 +393,6 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(t.state() == DownloadState::Completed, 15000);
         QCOMPARE(readFile(QDir(dir.path()).filePath(m.name)), data);
         QCOMPARE(t.receivedBytes(), t.totalBytes());
-        qunsetenv("ORBIT_ALLOW_LOOPBACK_PEERS");
     }
 
     void nextAnnounceDelaySecsAdaptsToPeerHealth() {
@@ -713,6 +874,331 @@ private slots:
         QVERIFY(!id2.isNull());
         QVERIFY(id2 != id);
         QCOMPARE(mgr2.taskById(id)->state(), DownloadState::Paused);
+    }
+
+    // Task 15: an unresolved magnet (never reached metainfoReady before the
+    // process restarted) must round-trip through torrents.json the same way
+    // a torrent does - same id, same destDir, restarted as a fresh
+    // FetchingMetadata placeholder (never silently dropped, never
+    // resurrected as some OTHER id). No DHT is wired here on purpose: this
+    // proves the restore path itself (parse the persisted magnet fields,
+    // re-derive the id, re-create the placeholder + kick off a new
+    // MetadataFetch) independently of whether that fetch can actually
+    // succeed - magnetResolvesViaDhtThenDownloads already covers the
+    // full-resolution path end-to-end.
+    void sessionRoundTripsUnresolvedMagnet() {
+        const QByteArray data = makeData(50000);
+        auto m = singleMeta(data, 16384);
+        const QString magnet = QStringLiteral("magnet:?xt=urn:btih:") +
+                               QString::fromLatin1(m.infoHash.toHex()) + QStringLiteral("&dn=my-torrent");
+
+        QTemporaryDir sessionDir; QVERIFY(sessionDir.isValid());
+        QTemporaryDir destDir;    QVERIFY(destDir.isValid());
+
+        QUuid id;
+        {
+            DownloadManager mgr(EngineConfig{}, sessionDir.path());
+            id = mgr.addMagnet(magnet, destDir.path(), PieceStrategy::RarestFirst);
+            QVERIFY(!id.isNull());
+            auto* t = mgr.taskById(id);
+            QVERIFY(t != nullptr);
+            QCOMPARE(t->state(), DownloadState::FetchingMetadata);
+            QCOMPARE(t->displayName(), QStringLiteral("my-torrent"));
+            QCOMPARE(t->kind(), AbstractTask::Kind::MagnetFetch);
+        }   // mgr destroyed: session already saved by addMagnet() itself
+
+        DownloadManager mgr2(EngineConfig{}, sessionDir.path());
+        mgr2.loadSession();
+        QCOMPARE(mgr2.tasks().size(), 1);
+        auto* t2 = mgr2.taskById(id);
+        QVERIFY(t2 != nullptr);
+        QCOMPARE(t2->state(), DownloadState::FetchingMetadata);
+        QCOMPARE(t2->displayName(), QStringLiteral("my-torrent"));
+
+        // Restarting a second time (no resolution happened - no DHT wired)
+        // must not duplicate the entry: same id, still exactly one task.
+        DownloadManager mgr3(EngineConfig{}, sessionDir.path());
+        mgr3.loadSession();
+        QCOMPARE(mgr3.tasks().size(), 1);
+        QVERIFY(mgr3.taskById(id) != nullptr);
+    }
+
+    // --- Task 14: DHT as a peer source --------------------------------------
+
+    // End-to-end proof that TorrentTask can find peers via DHT alone, with NO
+    // tracker and NO addPeerForTest: `holder` is an in-process DHT node that
+    // already has the seeder stored as a peer for this info_hash (as if the
+    // seeder had announced itself for real); `dht` is the task's own DHT node,
+    // bootstrapped only to `holder` (never touches the real internet). Once
+    // t.setDht(&dht) runs, TorrentTask must itself call dht.lookup() (from
+    // beginLeeching(), since the task isn't running yet when setDht() is
+    // called), receive `holder`'s peer via DhtNode::peersFound, connect to
+    // TestSeeder, and complete the download byte-identically.
+    void downloadsWithPeersFromDht() {
+        const QByteArray data = makeData(50000);          // 4 pieces @ 16384
+        auto m = singleMeta(data, 16384);
+        TestSeeder seeder(m.infoHash, data, 16384);
+
+        DhtNode holder(NodeId::fromSeed(200), 0, 200);
+        QVERIFY(holder.start());
+        holder.storePeerForTest(m.infoHash, QStringLiteral("127.0.0.1"), seeder.port());
+
+        DhtNode dht(NodeId::fromSeed(1), 0, 1);
+        QVERIFY(dht.start());
+        dht.bootstrap({QStringLiteral("127.0.0.1:%1").arg(holder.boundPort())});
+
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QNetworkAccessManager nam; RateLimiter rl;
+        TorrentTask t(m, dir.path(), allFiles(m), PieceStrategy::RarestFirst, 6881, 50,
+                      ResumeVerifyMode::TrustBitfield, 1, &nam, &rl, nullptr, dir.path());
+        t.setDht(&dht);      // NO addPeerForTest -- peers must come from DHT alone
+        t.start();
+        QTRY_VERIFY_WITH_TIMEOUT(t.state() == DownloadState::Completed, 15000);
+        QCOMPARE(readFile(QDir(dir.path()).filePath(m.name)), data);
+        QCOMPARE(t.receivedBytes(), t.totalBytes());
+    }
+
+    // Same end-to-end shape as downloadsWithPeersFromDht above, but exercising
+    // the MANAGER-level wiring instead of TorrentTask::setDht() directly:
+    // mgr.setDhtForTest(&dht) followed by mgr.addTorrent() (which builds the
+    // TorrentTask via the private makeTorrentTask(), the only call site that
+    // does `t->setDht(m_dht)`). downloadsWithPeersFromDht never touches either
+    // of those -- it builds a TorrentTask by hand -- so this is the only test
+    // proving DownloadManager actually wires DHT into a torrent it creates.
+    //
+    // Uses a REAL .torrent fixture (writeRealTorrentFixture, genuine piece
+    // SHA-1s over `payload`) rather than writeTorrentFixture's fake-hash one:
+    // addTorrent() goes through TorrentMetainfo::parse(), which computes the
+    // info-hash from the actual bencoded bytes, so the seeder/DHT holder must
+    // be keyed on that same real hash for the download to find peers and
+    // verify pieces at all. This lets the test go all the way to Completed,
+    // not just assert a non-null dht pointer.
+    void downloadsViaDownloadManagerDht() {
+        const QByteArray payload = makeData(50000);       // 4 pieces @ 16384
+        const qint64 pieceLen = 16384;
+
+        QTemporaryDir data; QVERIFY(data.isValid());
+        QByteArray infoHash;
+        // Nothing listens on 127.0.0.1:1 -- the tracker announce this fixture
+        // must legally have (TorrentMetainfo::parse requires one) fails
+        // instantly with connection-refused, no outbound DNS/HTTP, so this
+        // test's DHT-only peer discovery isn't racing a real network call
+        // during its QTRY_VERIFY_WITH_TIMEOUT wait below.
+        const QString tpath = writeRealTorrentFixture(data.path(), payload, pieceLen, &infoHash,
+                                                       QStringLiteral("real.torrent"),
+                                                       QStringLiteral("http://127.0.0.1:1/announce"));
+
+        TestSeeder seeder(infoHash, payload, pieceLen);
+
+        // `holder`: in-process DHT node standing in for "the seeder already
+        // announced itself for real" -- pre-seeded via storePeerForTest().
+        DhtNode holder(NodeId::fromSeed(310), 0, 310);
+        QVERIFY(holder.start());
+        holder.storePeerForTest(infoHash, QStringLiteral("127.0.0.1"), seeder.port());
+
+        // `dht`: the manager's own DHT node, bootstrapped ONLY to `holder`
+        // (never the real internet) -- this is what setDhtForTest() injects.
+        DhtNode dht(NodeId::fromSeed(3), 0, 3);
+        QVERIFY(dht.start());
+        dht.bootstrap({QStringLiteral("127.0.0.1:%1").arg(holder.boundPort())});
+
+        DownloadManager mgr(EngineConfig{}, data.path());
+        mgr.setDhtForTest(&dht);   // must run before any addTorrent()/loadTorrentSession()
+
+        auto id = mgr.addTorrent(tpath, data.path(), {0}, PieceStrategy::RarestFirst);
+        QVERIFY(!id.isNull());
+        auto* t = qobject_cast<TorrentTask*>(mgr.taskById(id));
+        QVERIFY(t != nullptr);
+
+        // NO addPeerForTest, NO tracker -- the only way this can ever
+        // discover the seeder is through the DHT node the manager wired in.
+        QTRY_VERIFY_WITH_TIMEOUT(t->state() == DownloadState::Completed, 15000);
+        QCOMPARE(readFile(QDir(data.path()).filePath("single.bin")), payload);
+        QCOMPARE(t->receivedBytes(), t->totalBytes());
+    }
+
+    // --- Task 17: DHT enable/port live-toggle (settings wiring) -------------
+
+    // Deliberately never calls setDhtEnabled(true)/setDhtConfig()/setDhtPort()
+    // while DHT is enabled: any of those fire the REAL internet bootstrap
+    // (DhtNode::kDefaultRouters is a hardcoded hostname list, so even a
+    // caller-injected setDhtForTest() double would get bootstrapped against
+    // the real routers). The disable path never bootstraps, so it's the only
+    // enable-state transition this test can safely exercise offline.
+    void dhtDisableDetachesTorrentTasksAndTearsDownNode() {
+        const QByteArray payload = makeData(50000);
+        const qint64 pieceLen = 16384;
+        QTemporaryDir data; QVERIFY(data.isValid());
+        QByteArray infoHash;
+        const QString tpath = writeRealTorrentFixture(data.path(), payload, pieceLen, &infoHash,
+                                                       QStringLiteral("t17.torrent"),
+                                                       QStringLiteral("http://127.0.0.1:1/announce"));
+
+        DhtNode testDht(NodeId::fromSeed(717), 0, 717);
+        QVERIFY(testDht.start());
+
+        DownloadManager mgr(EngineConfig{}, data.path());
+        mgr.setDhtForTest(&testDht);   // must run before addTorrent(); never touches the real internet
+
+        auto id = mgr.addTorrent(tpath, data.path(), {0}, PieceStrategy::RarestFirst);
+        QVERIFY(!id.isNull());
+        QCOMPARE(mgr.dhtNodeCount(), testDht.nodeCount());   // wired to the injected node
+
+        mgr.setDhtEnabled(false);        // disable path never calls startDhtBootstrap()
+        QCOMPARE(mgr.dhtNodeCount(), 0); // torn down from the manager's point of view
+
+        // The injected node itself is caller-owned -- setDhtEnabled(false)
+        // detaches from it but must never delete it (still perfectly usable).
+        QVERIFY(testDht.boundPort() != 0);
+
+        // Changing the port while disabled is stored for a future re-enable
+        // only -- no live rebind/bootstrap while DHT stays off.
+        mgr.setDhtPort(9999);
+        QCOMPARE(mgr.dhtNodeCount(), 0);
+    }
+
+    // --- Task 15: addMagnet() crown E2E --------------------------------------
+
+    // The full offline magnet -> download path: DownloadManager::addMagnet()
+    // parses a bare "magnet:?xt=urn:btih:<hex>" (no display name, no
+    // trackers -- DHT is the ONLY peer source available), resolves its info
+    // dict via MetadataFetch against a DHT-discovered metadata peer, caches
+    // the reconstructed .torrent, hands off to the exact same
+    // makeTorrentTask() addTorrent() uses, and the resulting TorrentTask
+    // downloads the real payload from a DHT-discovered seeder to completion.
+    //
+    // `holder` advertises BOTH the metadata peer and the seeder for the SAME
+    // info-hash (mirroring the brief): MetadataFetch's own DHT lookup will
+    // try connecting to both (the seeder just idles as a metadata candidate,
+    // never answering the ut_metadata extended handshake - harmless, see
+    // TestSeeder's "any other message ids are ignored" comment), and once
+    // metadata resolves, the new TorrentTask's OWN DHT lookup (via
+    // makeTorrentTask()'s setDht()) again gets both back, but only the seeder
+    // ever has anything to serve as a download peer.
+    void magnetResolvesViaDhtThenDownloads() {
+        const QByteArray data = makeData(50000);                 // 4 pieces @ 16384
+        auto m = singleMeta(data, 16384);                        // infoDict + infoHash + piece hashes
+        TestSeeder seeder(m.infoHash, data, 16384);
+        TestMetadataPeer metaPeer(m.infoHash, m.infoDict);
+
+        // DHT holder advertises BOTH the metadata peer and the seeder for infoHash.
+        DhtNode holder(NodeId::fromSeed(200), 0, 200);
+        QVERIFY(holder.start());
+        holder.storePeerForTest(m.infoHash, QStringLiteral("127.0.0.1"), metaPeer.port());
+        holder.storePeerForTest(m.infoHash, QStringLiteral("127.0.0.1"), seeder.port());
+
+        DhtNode dht(NodeId::fromSeed(1), 0, 1);
+        QVERIFY(dht.start());
+        dht.bootstrap({QStringLiteral("127.0.0.1:%1").arg(holder.boundPort())});
+
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        mgr.setDhtForTest(&dht);   // must run before any addMagnet()/addTorrent()/loadTorrentSession()
+
+        const QString magnet = QStringLiteral("magnet:?xt=urn:btih:") + QString::fromLatin1(m.infoHash.toHex());
+        const QUuid id = mgr.addMagnet(magnet, dir.path(), PieceStrategy::RarestFirst);
+        QVERIFY(!id.isNull());
+
+        QTRY_VERIFY_WITH_TIMEOUT(mgr.taskById(id) &&
+                                  mgr.taskById(id)->state() == DownloadState::Completed, 20000);
+        QCOMPARE(readFile(QDir(dir.path()).filePath(m.name)), data);
+
+        // The task that finished is a real TorrentTask, same id addMagnet()
+        // returned up front -- never a second/different task.
+        auto* t = qobject_cast<TorrentTask*>(mgr.taskById(id));
+        QVERIFY(t != nullptr);
+        QCOMPARE(t->receivedBytes(), t->totalBytes());
+
+        // The resolved torrent was cached for a future restart.
+        const QString hex = QString::fromLatin1(m.infoHash.toHex());
+        QVERIFY(QFile::exists(dir.path() + "/torrents/" + hex + ".torrent"));
+    }
+
+    // Regression (Task 15 verbatim-cache fix): the resolved magnet's info
+    // dict carries a "private" key TorrentMetainfo::parse doesn't extract
+    // into any TorrentMetainfo field. The cached torrents/<hex>.torrent must
+    // still re-parse to the SAME info-hash the magnet was resolved for --
+    // this would FAIL under the old encodeInfoDict/encodeTorrentBytes
+    // re-encode (it drops "private", producing different bytes and thus a
+    // different info-hash on re-parse), and only passes because
+    // DownloadManager now splices MetadataFetch's verbatim infoDict via
+    // TorrentMetainfo::wrapInfoDictAsTorrent instead.
+    void magnetCachesVerbatimInfoDictWithUnknownKeys() {
+        const QByteArray data = makeData(50000);
+        auto m = singleMetaWithPrivateFlag(data, 16384);
+        TestMetadataPeer metaPeer(m.infoHash, m.infoDict);
+
+        DhtNode holder(NodeId::fromSeed(210), 0, 210);
+        QVERIFY(holder.start());
+        holder.storePeerForTest(m.infoHash, QStringLiteral("127.0.0.1"), metaPeer.port());
+
+        DhtNode dht(NodeId::fromSeed(2), 0, 2);
+        QVERIFY(dht.start());
+        dht.bootstrap({QStringLiteral("127.0.0.1:%1").arg(holder.boundPort())});
+
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        DownloadManager mgr(EngineConfig{}, dir.path());
+        mgr.setDhtForTest(&dht);
+
+        const QString magnet = QStringLiteral("magnet:?xt=urn:btih:") + QString::fromLatin1(m.infoHash.toHex());
+        const QUuid id = mgr.addMagnet(magnet, dir.path(), PieceStrategy::RarestFirst);
+        QVERIFY(!id.isNull());
+
+        // Wait for the FetchingMetadata placeholder to be replaced by the real
+        // TorrentTask (same id) -- proof metadata resolved successfully.
+        QTRY_VERIFY_WITH_TIMEOUT(
+            mgr.taskById(id) && mgr.taskById(id)->kind() == AbstractTask::Kind::Torrent, 20000);
+
+        const QString hex = QString::fromLatin1(m.infoHash.toHex());
+        const QString cachedPath = dir.path() + "/torrents/" + hex + ".torrent";
+        QVERIFY(QFile::exists(cachedPath));
+
+        bool ok = false; QString err;
+        const TorrentMetainfo reparsed = TorrentMetainfo::parse(readFile(cachedPath), &ok, &err);
+        QVERIFY2(ok, qPrintable(err));
+        QCOMPARE(reparsed.infoHash, m.infoHash);
+    }
+
+    // --- Final-review Fix I1 --------------------------------------------------
+    // A MetadataFetch in flight (addMagnet(), never resolved -- no peer source
+    // ever answers, so it just sits FetchingMetadata) holds a raw DhtNode* and
+    // a periodic (kDhtRetryMs = 1s) retry timer that calls m_dht->lookup(...).
+    // DownloadManager::setDhtEnabled(false) tears down the manager-OWNED
+    // DhtNode this fetch is wired to; before Fix I1 nothing told the fetch,
+    // so the retry timer's very next tick dereferenced freed memory. Uses the
+    // ctor's own default DhtNode (never setDhtForTest()) specifically so this
+    // delete is REAL, not a no-op on a caller-owned test double -- and never
+    // enables/bootstraps it (setDhtEnabled(false) never calls
+    // startDhtBootstrap(), see dhtDisableDetachesTorrentTasksAndTearsDownNode
+    // above), so this stays fully offline like every other test here.
+    void dhtDisableDuringInFlightMetadataFetchDoesNotDangle() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        DownloadManager mgr(EngineConfig{}, dir.path());
+
+        const QByteArray infoHash =
+            QCryptographicHash::hash("i1-fix-test-info-hash", QCryptographicHash::Sha1);
+        const QString magnet =
+            QStringLiteral("magnet:?xt=urn:btih:") + QString::fromLatin1(infoHash.toHex());
+        const QUuid id = mgr.addMagnet(magnet, dir.path(), PieceStrategy::RarestFirst);
+        QVERIFY(!id.isNull());
+        QVERIFY(mgr.taskById(id) != nullptr);
+        QCOMPARE(mgr.taskById(id)->state(), DownloadState::FetchingMetadata);
+
+        // Deletes the manager-owned DhtNode the in-flight MetadataFetch is
+        // wired to. Fix I1: DownloadManager must rewire every m_metadataFetches
+        // entry to nullptr (which stops its retry timer) BEFORE this delete.
+        mgr.setDhtEnabled(false);
+        QCOMPARE(mgr.dhtNodeCount(), 0);
+
+        // Outlive the 1s retry period several times over -- a pre-fix build
+        // dereferences the freed DhtNode here (crash/UB under a sanitizer).
+        QTest::qWait(3000);
+
+        // Still alive and untouched: nothing else was ever going to resolve
+        // this magnet (no DHT, no trackers, no injected peer), so it's still
+        // exactly where it started.
+        QVERIFY(mgr.taskById(id) != nullptr);
+        QCOMPARE(mgr.taskById(id)->state(), DownloadState::FetchingMetadata);
     }
 };
 

@@ -221,3 +221,46 @@ TorrentMetainfo TorrentMetainfo::parse(const QByteArray& torrentBytes, bool* ok,
     if (ok) *ok = true;
     return m;
 }
+
+QByteArray TorrentMetainfo::wrapInfoDictAsTorrent(const QByteArray& infoDict, const QStringList& trackers) {
+    // Hand-assemble the top-level dict bytes so `infoDict` is spliced in
+    // verbatim: Bencode::decode doesn't require sorted dict-key order (see
+    // Bencode.h), so we're free to lay out announce/announce-list/info in
+    // any order; only the "info" value's byte-for-byte identity with
+    // `infoDict` matters (that's what makes the SHA-1 come out right).
+    QByteArray top;
+    top += 'd';
+    top += Bencode::encode(BencodeValue::makeBytes("announce"));
+    top += Bencode::encode(BencodeValue::makeBytes(trackers.isEmpty() ? QByteArray() : trackers.first().toUtf8()));
+
+    if (!trackers.isEmpty()) {
+        // Magnet `tr=` trackers are a flat, equal-priority set (no BEP 12
+        // tiering info in the URI), so all of them go in a single tier --
+        // mirrors how MetadataFetch itself builds the AnnounceController
+        // tiers it announces to while gathering peers.
+        top += Bencode::encode(BencodeValue::makeBytes("announce-list"));
+        QList<BencodeValue> tier;
+        for (const QString& t : trackers) tier.append(BencodeValue::makeBytes(t.toUtf8()));
+        top += Bencode::encode(BencodeValue::makeList({BencodeValue::makeList(tier)}));
+    }
+
+    top += Bencode::encode(BencodeValue::makeBytes("info"));
+    top += infoDict; // raw, verbatim -- NOT re-encoded/re-decoded
+    top += 'e';
+    return top;
+}
+
+TorrentMetainfo TorrentMetainfo::fromInfoDict(const QByteArray& infoDict, const QStringList& trackers) {
+    const QByteArray top = wrapInfoDictAsTorrent(infoDict, trackers);
+
+    bool ok = false;
+    QString err;
+    TorrentMetainfo m = parse(top, &ok, &err);
+    // fromInfoDict is only ever called with a peer-served info dict whose
+    // SHA-1 PeerConnection already verified against the magnet's info-hash
+    // before emitting metadataComplete; a parse failure here would mean a
+    // bug in this wrapping, not bad peer data.
+    Q_ASSERT(ok);
+    Q_ASSERT(m.infoHash == QCryptographicHash::hash(infoDict, QCryptographicHash::Sha1));
+    return m;
+}

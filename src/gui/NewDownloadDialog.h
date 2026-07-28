@@ -17,6 +17,13 @@ public:
     QUrl        url() const;
     QString     destPath() const;
     static bool isValidDownloadUrl(const QUrl& u);   // http/https/ftp (spec §3.7)
+    // Task 16: magnet: links aren't a downloadable URL (no host) and skip the
+    // HTTP probe entirely (startProbe() already no-ops on them via
+    // isValidDownloadUrl) - accepted as an alternate OK-button condition so a
+    // pasted magnet: string doesn't get silently rejected by this dialog.
+    static bool isValidMagnetUri(const QString& text);
+    QString     magnetUri() const;   // trimmed URL-field text if isValidMagnetUri(), else empty
+    QString     destDir() const;     // Task 16: dir alone, for the magnet path (no per-file name)
 public slots:
     // Aplica o nome sugerido se `probedUrl` ainda é a URL atual, o nome não é
     // vazio e o usuário não editou o campo. Ponto de teste sem rede.

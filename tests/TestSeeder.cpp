@@ -46,11 +46,16 @@ struct TestSeeder::Session {
 
 TestSeeder::TestSeeder(const QByteArray& infoHash, const QByteArray& data, qint64 pieceLength,
                        QObject* parent)
+    : TestSeeder(infoHash, data, pieceLength, Advertise::NormalBitfield, parent) {}
+
+TestSeeder::TestSeeder(const QByteArray& infoHash, const QByteArray& data, qint64 pieceLength,
+                       Advertise advertise, QObject* parent)
     : QObject(parent),
       m_infoHash(infoHash),
       m_data(data),
       m_pieceLength(pieceLength),
-      m_pieceCount(pieceLength > 0 ? int((data.size() + pieceLength - 1) / pieceLength) : 0) {
+      m_pieceCount(pieceLength > 0 ? int((data.size() + pieceLength - 1) / pieceLength) : 0),
+      m_advertise(advertise) {
     connect(&m_server, &QTcpServer::newConnection, this, &TestSeeder::onNewConnection);
     m_server.listen(QHostAddress::LocalHost, 0);
 }
@@ -68,14 +73,37 @@ void TestSeeder::onNewConnection() {
                 s->handshakeDone = true;
                 s->buf.remove(0, PeerWire::kHandshakeSize);
 
-                // Echo our own handshake, then advertise a full bitfield and
-                // unchoke unconditionally — we are a seeder, always willing.
+                // Echo our own handshake, then advertise the pieces we hold
+                // (full set — we are a seeder) and unchoke unconditionally.
                 s->sock->write(PeerWire::handshake(m_infoHash, seederPeerId()));
                 Bitfield bf(m_pieceCount);
                 for (int i = 0; i < m_pieceCount; ++i) bf.set(i);
-                s->sock->write(frame(PeerWire::Bitfield, bf.toBytes()));
-                s->sock->write(frame(PeerWire::Unchoke));
-                s->sock->flush();
+
+                if (m_advertise == Advertise::HaveAll) {
+                    // BEP 6 <have_all> (id 14), no bitfield frame.
+                    s->sock->write(frame(14));
+                    s->sock->write(frame(PeerWire::Unchoke));
+                    s->sock->flush();
+                } else if (m_advertise == Advertise::FragmentedBitfield) {
+                    // Split the bitfield frame across two readyRead deliveries,
+                    // as a >MTU bitfield does on a real network. Write the first
+                    // half now; write the remainder + unchoke after one turn of
+                    // the event loop so the client sees a partial frame first.
+                    const QByteArray bfFrame = frame(PeerWire::Bitfield, bf.toBytes());
+                    const int half = bfFrame.size() / 2;
+                    s->sock->write(bfFrame.left(half));
+                    s->sock->flush();
+                    QByteArray rest = bfFrame.mid(half) + frame(PeerWire::Unchoke);
+                    QTcpSocket* sock = s->sock;
+                    QTimer::singleShot(5, this, [sock, rest] {
+                        sock->write(rest);
+                        sock->flush();
+                    });
+                } else {
+                    s->sock->write(frame(PeerWire::Bitfield, bf.toBytes()));
+                    s->sock->write(frame(PeerWire::Unchoke));
+                    s->sock->flush();
+                }
             }
 
             PeerWire::Msg msg;

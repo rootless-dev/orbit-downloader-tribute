@@ -19,6 +19,10 @@ add_library(orbitcore STATIC
   RateLimiter.cpp
   Logger.cpp
   torrent/Bencode.cpp
+  torrent/MagnetUri.cpp
+  torrent/NodeId.cpp
+  torrent/RoutingTable.cpp
+  torrent/KrpcCodec.cpp
   torrent/TorrentMetainfo.cpp
   torrent/TrackerPeers.cpp
   torrent/Bitfield.cpp
@@ -33,6 +37,9 @@ add_library(orbitcore STATIC
   torrent/TorrentTask.cpp
   torrent/AnnounceController.h
   torrent/AnnounceController.cpp
+  torrent/DhtNode.cpp
+  torrent/MetadataFetch.h
+  torrent/MetadataFetch.cpp
 )
 set_target_properties(orbitcore PROPERTIES LINKER_LANGUAGE CXX)
 target_include_directories(orbitcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

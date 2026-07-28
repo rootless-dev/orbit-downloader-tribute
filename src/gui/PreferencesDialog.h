@@ -9,6 +9,7 @@ class QCheckBox;
 class QTimeEdit;
 class QListWidget;
 class QStackedWidget;
+class QLabel;
 
 class PreferencesDialog : public QDialog {
     Q_OBJECT
@@ -18,7 +19,12 @@ public:
         Monitoring, Scheduler, BitTorrent, P2PNetwork, Proxy, Others
     };
 
-    explicit PreferencesDialog(const AppSettings& current, QWidget* parent = nullptr);
+    // `dhtNodeCount`: a snapshot of DhtNode::nodeCount() at the moment this
+    // dialog is opened (from DownloadManager::dhtNodeCount()), or -1 (the
+    // default) when the caller doesn't have/care about a live count -- shown
+    // read-only next to the DHT toggle; -1 (or DHT disabled) renders as "-".
+    explicit PreferencesDialog(const AppSettings& current, QWidget* parent = nullptr,
+                                int dhtNodeCount = -1);
     AppSettings result() const;
     void setInitialCategory(Category c);
 
@@ -37,9 +43,13 @@ public:
     void setBtListenPortForTest(quint16 p);
     void setBtVerifyForTest(ResumeVerifyMode m);
     void setBtStrategyForTest(PieceStrategy s);
+    void setDhtEnabledForTest(bool on);
+    void setDhtPortForTest(quint16 p);
+    QString dhtNodeCountTextForTest() const;
 
 private:
     void loadFromSettings(const AppSettings& s);   // (re)apply values onto existing widgets
+    void updateDhtNodeCountLabel();                // reflects m_dhtNodeCountValue + the checkbox state
 
     AppSettings m_base;                 // preserves non-edited fields
     // Navigation
@@ -78,4 +88,9 @@ private:
     QComboBox* m_btVerify     = nullptr;
     QComboBox* m_btStrategy   = nullptr;
     QSpinBox*  m_btListenPort = nullptr;
+    // DHT (Task 17)
+    QCheckBox* m_dhtEnabled   = nullptr;
+    QSpinBox*  m_dhtPort      = nullptr;
+    QLabel*    m_dhtNodeCount = nullptr;   // read-only diagnostics label, not part of result()
+    int        m_dhtNodeCountValue = -1;   // snapshot passed in at construction; -1 = unknown
 };

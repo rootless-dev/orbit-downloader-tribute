@@ -9,6 +9,7 @@
 
 #include <QByteArray>
 #include <QHash>
+#include <QMetaObject>
 #include <QSet>
 #include <QString>
 #include <QUuid>
@@ -24,6 +25,7 @@ enum class LogLevel;
 class PieceStore;
 class PeerConnection;
 class AnnounceController;
+class DhtNode;
 
 // Task 10: the BitTorrent leech engine.
 //
@@ -79,6 +81,17 @@ public:
     void                   restoreBitfield(); // read <resumeDir>/<hexInfoHash>.bitfield if present
     void                   addPeerForTest(const PeerAddress& p); // TEST SEAM: inject a peer, no tracker
 
+    // Task 14: DHT as a peer source. `dht` is NOT owned/parented here -- it is
+    // a single instance DownloadManager shares across every TorrentTask (or,
+    // in tests, one the caller keeps alive on the stack), and it outlives
+    // this task. Passing nullptr detaches from a previously-set DhtNode
+    // (unsubscribes, if currently subscribed). If the task is already
+    // Connecting/Downloading when this is called, subscribes to
+    // DhtNode::peersFound immediately and kicks off a lookup() for this
+    // torrent's info_hash; otherwise beginLeeching() does both when the task
+    // starts running.
+    void                   setDht(DhtNode* dht);
+
     // Diagnostics (peer/tracker observability): exposed for the GUI
     // Properties panel and the per-download Log tab's heartbeat line.
     int     connectedPeerCount() const { return m_peers.size(); }
@@ -125,6 +138,8 @@ private:
     void    teardownPeers();
     void    logLine(LogLevel level, const QString& msg);
     void    rescheduleAnnounceTimer(); // adaptive cadence (part C): starved -> re-announce often
+    void    subscribeDht();            // (re)connects to m_dht->peersFound, filtered to our info_hash
+    void    unsubscribeDht();          // disconnects m_dhtPeersConn if live; safe to call when not connected
 
     // Config / collaborators (not owned unless noted).
     TorrentMetainfo         m_meta;
@@ -149,6 +164,8 @@ private:
     std::unique_ptr<PieceStore>  m_store;   // owned
     std::unique_ptr<PiecePicker> m_picker;  // owned
     AnnounceController*          m_announce = nullptr; // owned (QObject child)
+    DhtNode*                     m_dht = nullptr;       // NOT owned; shared, outlives this task
+    QMetaObject::Connection      m_dhtPeersConn;        // live only while subscribed to m_dht->peersFound
     Bitfield                     m_have;
     QSet<int>                    m_wanted;
     int                          m_wantedHaveCount = 0;

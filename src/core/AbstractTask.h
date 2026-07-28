@@ -12,7 +12,11 @@
 class AbstractTask : public QObject {
     Q_OBJECT
 public:
-    enum class Kind { Http, Ftp, Torrent };
+    // MagnetFetch (Task 15): the transient FetchingMetadata placeholder
+    // DownloadManager::addMagnet() shows while MetadataFetch resolves a
+    // magnet's info dict - never persists past that (replaced by a Torrent
+    // once resolved).
+    enum class Kind { Http, Ftp, Torrent, MagnetFetch };
     explicit AbstractTask(QObject* parent = nullptr) : QObject(parent) {}
     virtual Kind    kind() const = 0;
     virtual QUuid   id() const = 0;

@@ -38,11 +38,15 @@
 #include "torrent/TorrentMetainfo.h"
 #include "torrent/TorrentTask.h"
 #include "torrent/Bitfield.h"
+#include "torrent/Bencode.h"
+#include "torrent/DhtNode.h"
+#include "torrent/NodeId.h"
 #include "RateLimiter.h"
 #include "ContextMenuRules.h"
 #include "Theme.h"
 #include "AutostartService.h"
 #include "TestServer.h"
+#include "TestMetadataPeer.h"
 #include <QAction>
 #include <QLabel>
 #include <QLineEdit>
@@ -61,6 +65,7 @@
 #include <QSet>
 #include <QTcpServer>
 #include <QDataStream>
+#include <QCryptographicHash>
 
 static QVector<Segment> segs2(qint64 total) {
     // two contiguous halves, each fully pending (current==start)
@@ -139,6 +144,36 @@ static QByteArray readFile(const QString& path) {
     if (!f.open(QIODevice::ReadOnly)) return QByteArray();
     return f.readAll();
 }
+// --- Final-review Fix C1 test fixture -------------------------------------
+// Minimal single-file BEP3 info dict whose infoHash is the REAL SHA-1 of the
+// encoded bytes (mirrors tst_torrent.cpp's singleMeta()/encodeSingleFileInfoDict,
+// duplicated locally here rather than shared - every tst_*.cpp in this suite
+// builds its own tiny fixture helpers instead of a cross-file dependency).
+// Only the metadata resolve path is exercised (never an actual payload
+// download), so a single tiny fake piece hash is enough.
+struct GuiMetaFixture : TorrentMetainfo { QByteArray infoDict; };
+static GuiMetaFixture guiSingleFileMeta() {
+    GuiMetaFixture m;
+    m.name = QStringLiteral("c1-fix.bin");
+    m.pieceLength = 16384;
+    m.totalLength = 16384;
+    m.isMultiFile = false;
+    FileEntry f; f.path = m.name; f.length = m.totalLength; f.offset = 0;
+    m.files = {f};
+    m.pieceHashes.append(QCryptographicHash::hash("piece-0", QCryptographicHash::Sha1));
+
+    QMap<QByteArray, BencodeValue> info;
+    info.insert("length", BencodeValue::makeInt(m.totalLength));
+    info.insert("name", BencodeValue::makeBytes(m.name.toUtf8()));
+    info.insert("piece length", BencodeValue::makeInt(m.pieceLength));
+    QByteArray pieces;
+    for (const QByteArray& h : m.pieceHashes) pieces += h;
+    info.insert("pieces", BencodeValue::makeBytes(pieces));
+    m.infoDict = Bencode::encode(BencodeValue::makeDict(info));
+    m.infoHash = QCryptographicHash::hash(m.infoDict, QCryptographicHash::Sha1);
+    return m;
+}
+
 static bool waitForState(DownloadManager& mgr, const QUuid& id, DownloadState want, int timeoutMs) {
     QDeadlineTimer dl(timeoutMs);
     while (!dl.hasExpired()) {
@@ -1601,6 +1636,43 @@ private slots:
         QVERIFY(a != b);
     }
 
+    // --- Task 17: DHT settings + BitTorrent-page widgets --------------------
+
+    void preferencesRoundTripsDhtPrefs() {
+        AppSettings in;
+        in.dht.enabled = true;
+        in.dht.port    = 6881;
+        PreferencesDialog dlg(in);
+        dlg.setDhtEnabledForTest(false);
+        dlg.setDhtPortForTest(6969);
+        const AppSettings out = dlg.result();
+        QCOMPARE(out.dht.enabled, false);
+        QCOMPARE(out.dht.port, quint16(6969));
+    }
+
+    void preferencesDhtNodeCountLabelReflectsSnapshotAndToggle() {
+        AppSettings in; in.dht.enabled = true;
+        PreferencesDialog dlg(in, nullptr, /*dhtNodeCount=*/12);
+        QCOMPARE(dlg.dhtNodeCountTextForTest(), QString("12 nodes"));
+        dlg.setDhtEnabledForTest(false);           // unchecking hides the count live
+        QCOMPARE(dlg.dhtNodeCountTextForTest(), QString(QChar(0x2014)));   // em dash
+    }
+
+    void preferencesDhtNodeCountShowsDashWhenUnknown() {
+        AppSettings in; in.dht.enabled = true;
+        PreferencesDialog dlg(in);                 // no snapshot passed -> -1 (unknown)
+        QCOMPARE(dlg.dhtNodeCountTextForTest(), QString(QChar(0x2014)));
+    }
+
+    void dhtSettingsEqualityDetectsChange() {
+        DhtSettings a, b;
+        QVERIFY(a == b);
+        b.port = 6969;
+        QVERIFY(a != b);
+        b = a; b.enabled = false;
+        QVERIFY(a != b);
+    }
+
     // --- Task 13: TorrentOpenDialog (offscreen smoke test) -----------------
 
     void torrentOpenDialogConstructsAndExposesGetters() {
@@ -1640,6 +1712,144 @@ private slots:
         QCOMPARE(dlg.selectedFiles(), QSet<int>({0}));
         QCOMPARE(subFolder->checkState(0), Qt::Unchecked);   // sub's only child is now unchecked
         QCOMPARE(root->checkState(0), Qt::PartiallyChecked); // a.txt still checked, sub is not
+    }
+
+    // --- Task 16: GUI magnet entry + FetchingMetadata rendering ------------
+
+    // DownloadTableModel's FetchingMetadata rendering was already done in
+    // Task 15 (stateText()/Size branches) - this proves it via the actual
+    // seam a magnet add uses (DownloadManager::addMagnet), not a synthetic
+    // row, mirroring model_rows_reflect_manager_tasks()'s style above.
+    void model_renders_fetching_metadata_row_for_magnet() {
+        EngineConfig cfg; QString dir = makeTempDir();
+        DownloadManager mgr(cfg, dir);
+        DownloadTableModel model(&mgr);
+
+        const QString magnet = QStringLiteral(
+            "magnet:?xt=urn:btih:143b885127dfa398b9c58f4abc7f3145b91f5f4f&dn=ubuntu.iso");
+        const QUuid id = mgr.addMagnet(magnet, dir, PieceStrategy::RarestFirst);
+        QVERIFY(!id.isNull());
+        model.appendTask(mgr.taskById(id));
+
+        QCOMPARE(model.rowCount(), 1);
+        const QModelIndex sizeIx = model.index(0, DownloadTableModel::Size);
+        QCOMPARE(model.data(sizeIx).toString(), QString("—"));   // "—"
+        const QModelIndex stIx = model.index(0, DownloadTableModel::Status);
+        QVERIFY(model.data(stIx).toString().contains("magnet", Qt::CaseInsensitive));
+        QCOMPARE(model.data(model.index(0, DownloadTableModel::Name)).toString(),
+                 QString("ubuntu.iso"));
+    }
+
+    // Final-review Fix C1: DownloadManager::onMetadataReady() deleteLater()s
+    // the transient MagnetTask placeholder and appends a brand-new
+    // TorrentTask under the SAME id (DownloadManager.cpp) - without
+    // DownloadManager::taskReplaced -> DownloadTableModel::retargetTask(),
+    // the model's Row::task would still point at the freed placeholder
+    // (UAF in data()/onSpeedTick(), frozen "Resolving magnet…" row). Drives a
+    // magnet through a REAL in-process DHT resolve (mirrors
+    // tst_torrent.cpp's magnetResolvesViaDhtThenDownloads), wiring
+    // taskReplaced -> retargetTask() the exact same way MainWindow does in
+    // production (see MainWindow.cpp), without needing a full MainWindow.
+    void model_retargets_row_after_magnet_resolves_via_dht() {
+        auto m = guiSingleFileMeta();
+        TestMetadataPeer metaPeer(m.infoHash, m.infoDict);
+
+        // DHT holder advertising the metadata peer for infoHash.
+        DhtNode holder(NodeId::fromSeed(900), 0, 900);
+        QVERIFY(holder.start());
+        holder.storePeerForTest(m.infoHash, QStringLiteral("127.0.0.1"), metaPeer.port());
+
+        DhtNode dht(NodeId::fromSeed(901), 0, 901);
+        QVERIFY(dht.start());
+        dht.bootstrap({QStringLiteral("127.0.0.1:%1").arg(holder.boundPort())});
+
+        QString dir = makeTempDir();
+        DownloadManager mgr(EngineConfig{}, dir);
+        mgr.setDhtForTest(&dht);   // must run before any addMagnet()/addTorrent()/loadTorrentSession()
+
+        DownloadTableModel model(&mgr);
+        // The exact production seam (MainWindow.cpp's ctor): re-point the
+        // row rather than remove+re-append it.
+        connect(&mgr, &DownloadManager::taskReplaced, &model,
+                [&mgr, &model](const QUuid& tid) { model.retargetTask(tid, mgr.taskById(tid)); });
+
+        const QString magnet =
+            QStringLiteral("magnet:?xt=urn:btih:") + QString::fromLatin1(m.infoHash.toHex());
+        const QUuid id = mgr.addMagnet(magnet, dir, PieceStrategy::RarestFirst);
+        QVERIFY(!id.isNull());
+        model.appendTask(mgr.taskById(id));
+
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.data(model.index(0, DownloadTableModel::Size)).toString(), QString("—"));
+
+        // Wait for the placeholder -> real TorrentTask swap (same id).
+        QTRY_VERIFY_WITH_TIMEOUT(mgr.taskById(id) &&
+                                  mgr.taskById(id)->kind() == AbstractTask::Kind::Torrent, 20000);
+
+        // (a) must not crash reading the row (data()) or ticking it
+        // (onSpeedTick(), the 1s QTimer m_tick already running inside model)
+        // now that the placeholder behind it is gone.
+        QTest::qWait(1100);
+        (void)model.data(model.index(0, DownloadTableModel::Status));
+
+        // (b) re-points to the real TorrentTask: row's task pointer equals
+        // taskById(id), Size no longer "—", state advanced past
+        // FetchingMetadata (a fresh TorrentTask starts Queued/Connecting).
+        QCOMPARE(model.taskAt(0), mgr.taskById(id));
+        QVERIFY(model.data(model.index(0, DownloadTableModel::Size)).toString() != QString("—"));
+        QVERIFY(model.data(model.index(0, DownloadTableModel::Status)).toString() !=
+                QString("Resolving magnet…"));
+    }
+
+    // --- Task 16: shouldOfferMagnet (clipboard monitor, magnet: links) -----
+
+    void shouldOfferMagnetAcceptsValidMagnet() {
+        const QString uri = "magnet:?xt=urn:btih:143b885127dfa398b9c58f4abc7f3145b91f5f4f";
+        const auto r = shouldOfferMagnet(uri, QString(), false);
+        QVERIFY(r.has_value());
+        QCOMPARE(*r, uri);
+    }
+
+    void shouldOfferMagnetRejectsNonMagnet() {
+        QVERIFY(!shouldOfferMagnet("http://h/a.bin", QString(), false).has_value());
+        QVERIFY(!shouldOfferMagnet("bom dia", QString(), false).has_value());
+        QVERIFY(!shouldOfferMagnet("", QString(), false).has_value());
+    }
+
+    void shouldOfferMagnetRejectsMalformedHash() {
+        // Right prefix, bad hash (mirrors tst_magneturi.cpp's bad-hash case):
+        // MagnetUri::parse().isValid() must reject it, not just the "magnet:?" prefix.
+        QVERIFY(!shouldOfferMagnet("magnet:?xt=urn:btih:zzzz", QString(), false).has_value());
+    }
+
+    void shouldOfferMagnetRejectsSelfCopy() {
+        const QString uri = "magnet:?xt=urn:btih:143b885127dfa398b9c58f4abc7f3145b91f5f4f";
+        QVERIFY(!shouldOfferMagnet(uri, QString(), true).has_value());
+    }
+
+    void shouldOfferMagnetRejectsImmediateRepeat() {
+        const QString uri = "magnet:?xt=urn:btih:143b885127dfa398b9c58f4abc7f3145b91f5f4f";
+        QVERIFY(!shouldOfferMagnet(uri, uri, false).has_value());
+    }
+
+    void shouldOfferMagnetAcceptsDifferentMagnetAfterPrevious() {
+        const QString a = "magnet:?xt=urn:btih:143b885127dfa398b9c58f4abc7f3145b91f5f4f";
+        const QString b = "magnet:?xt=urn:btih:CQ5YQUJH36RZROOFR5FLY7ZRIW4R6X2P";
+        QVERIFY(shouldOfferMagnet(b, a, false).has_value());
+    }
+
+    // NewDownloadDialog: a pasted magnet: string is a valid alternate OK
+    // condition (Task 16) - magnetUri() surfaces it distinctly from url()/
+    // destPath() so MainWindow can route it to addMagnet instead of addDownload.
+    void dialogAcceptsMagnetUriInUrlField() {
+        NewDownloadDialog d;
+        auto* urlEdit = d.findChild<QLineEdit*>("urlEdit");
+        QVERIFY(urlEdit != nullptr);
+        const QString magnet = "magnet:?xt=urn:btih:143b885127dfa398b9c58f4abc7f3145b91f5f4f";
+        urlEdit->setText(magnet);
+        QVERIFY(NewDownloadDialog::isValidMagnetUri(magnet));
+        QCOMPARE(d.magnetUri(), magnet);
+        QVERIFY(!NewDownloadDialog::isValidDownloadUrl(d.url()));   // not an http/ftp path
     }
 };
 

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <QByteArray>
+#include <QMetaType>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 #include <QVector>
 
@@ -33,4 +35,27 @@ struct TorrentMetainfo {
     // or missing field, sets *ok = false (and *err, if provided, to a
     // human-readable message) and returns a default-constructed value.
     static TorrentMetainfo parse(const QByteArray& torrentBytes, bool* ok, QString* err = nullptr);
+
+    // Hand-assembles a top-level .torrent dict around `infoDict`, splicing it
+    // in VERBATIM (never re-encoded/re-decoded) as the "info" value -- so
+    // parse()'s raw-span SHA-1 over the result hashes exactly `infoDict`'s
+    // bytes, whatever keys it contains (including any this codebase doesn't
+    // itself recognize/round-trip, e.g. BEP 27 "private", "source", per-file
+    // "md5sum"...). `trackers` populate both "announce" (first tracker, or
+    // empty if none) and a single-tier "announce-list" (magnet `tr=`
+    // trackers are a flat, equal-priority set with no BEP 12 tiering info).
+    // Pure/no I/O: callers decide what to do with the returned bytes (parse
+    // them back via parse(), write them to disk as a cached .torrent, ...).
+    static QByteArray wrapInfoDictAsTorrent(const QByteArray& infoDict, const QStringList& trackers);
+
+    // Builds a full TorrentMetainfo from a RAW BEP 9 info dict (as recovered
+    // by MetadataFetch from a magnet-link peer, already SHA-1-verified by
+    // PeerConnection) plus the magnet's tracker list. Wraps `infoDict` via
+    // wrapInfoDictAsTorrent() (verbatim, never re-encoded/re-decoded) and
+    // parses the result, so the returned infoHash is guaranteed to equal
+    // SHA1(infoDict) -- the same value the peer's metadata was already
+    // verified against.
+    static TorrentMetainfo fromInfoDict(const QByteArray& infoDict, const QStringList& trackers);
 };
+
+Q_DECLARE_METATYPE(TorrentMetainfo)

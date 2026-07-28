@@ -84,6 +84,10 @@ AppSettings fromJson(const QJsonObject& root, const EngineConfig& defaults) {
     s.bittorrent.verify             = verifyFromStr(bt.value("verify").toString());
     s.bittorrent.defaultStrategy    = strategyFromStr(bt.value("strategy").toString());
     s.bittorrent.listenPort         = quint16(bt.value("listenPort").toInt(6881));
+
+    const QJsonObject dht = root.value("dht").toObject();
+    s.dht.enabled = dht.value("enabled").toBool(true);
+    s.dht.port    = quint16(dht.value("port").toInt(6881));
     return s;
 }
 
@@ -112,6 +116,9 @@ QJsonObject toJson(const AppSettings& s, const QJsonObject& prev) {
         {"verify",             verifyToStr(s.bittorrent.verify)},
         {"strategy",           strategyToStr(s.bittorrent.defaultStrategy)},
         {"listenPort",         int(s.bittorrent.listenPort)}};
+    root["dht"] = QJsonObject{
+        {"enabled", s.dht.enabled},
+        {"port",    int(s.dht.port)}};
     return root;
 }
 

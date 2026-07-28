@@ -2,6 +2,7 @@
 
 #include "Logger.h"
 #include "torrent/AnnounceController.h"
+#include "torrent/DhtNode.h"
 #include "torrent/PeerConnection.h"
 #include "torrent/PieceStore.h"
 
@@ -110,6 +111,11 @@ TorrentTask::~TorrentTask() {
     // Flush any debounced resume state that hasn't hit disk yet, so a task
     // destroyed mid-flight (the "restart" resume path) never loses progress.
     if (m_resumePending) saveResumeNow();
+    // The shared DhtNode outlives this task; drop our subscription explicitly
+    // (Qt would also auto-disconnect a `this`-context connection on our own
+    // destruction, but doing it here keeps the "who is listening" invariant
+    // obvious and matches the other stop paths below).
+    unsubscribeDht();
     // Peers are QObject children; Qt tears them down. unique_ptr members
     // (PieceStore/PiecePicker) need the complete type here — provided by the
     // includes above.
@@ -215,6 +221,16 @@ bool TorrentTask::haveAllWanted() const { return m_wantedHaveCount >= m_wanted.s
 void TorrentTask::beginLeeching() {
     setState(DownloadState::Connecting);
 
+    // Task 14: DHT as a peer source, alongside (or instead of, for a
+    // tracker-less/Ubuntu-style DHT-only .torrent) any trackers below.
+    // subscribeDht() is idempotent (drops any prior connection first), so a
+    // restart via forceRecheck()'s teardownPeers()->beginLeeching() cycle
+    // never double-subscribes.
+    if (m_dht) {
+        subscribeDht();
+        m_dht->lookup(m_meta.infoHash);
+    }
+
     if (!m_meta.announceList.isEmpty()) {
         if (!m_announce) {
             m_announce = new AnnounceController(m_meta.announceList, m_nam, m_rngSeed, this);
@@ -273,6 +289,16 @@ void TorrentTask::beginLeeching() {
                         .arg(connectedPeerCount()).arg(unchokedPeerCount())
                         .arg(m_wantedHaveCount).arg(m_wanted.size()));
             rescheduleAnnounceTimer();
+            // Same starvation predicate as the adaptive re-announce cadence
+            // above (nextAnnounceDelaySecsImpl): re-walk the DHT while
+            // peer-starved. This is the ONLY periodic trigger available for a
+            // tracker-less DHT-only torrent (m_announceTimer is never created
+            // when announceList is empty). lookup() itself is a no-op while a
+            // walk for this info_hash is already in flight, so this can't
+            // pile up concurrent lookups.
+            if (m_dht && (connectedPeerCount() < kHealthyPeers || m_verifiedBytes == 0)) {
+                m_dht->lookup(m_meta.infoHash);
+            }
         });
     }
     m_heartbeatTimer->start(kHeartbeatMs);
@@ -293,6 +319,9 @@ void TorrentTask::openPeers() {
 
 void TorrentTask::wirePeer(PeerConnection* pc) {
     connect(pc, &PeerConnection::handshakeOk, this, [this, pc] { onHandshake(pc); });
+    connect(pc, &PeerConnection::peerLog, this, [this, pc](const QString& line) {
+        logLine(LogLevel::Debug, QStringLiteral("peer %1: %2").arg(pc->label(), line));
+    });
     connect(pc, &PeerConnection::bitfieldReceived, this, [this, pc] {
         m_picker->addPeerBitfield(pc->peerBitfield());
         logLine(LogLevel::Info, QStringLiteral("peer %1 has %2/%3 pieces")
@@ -302,6 +331,7 @@ void TorrentTask::wirePeer(PeerConnection* pc) {
         requestMore(pc);
     });
     connect(pc, &PeerConnection::haveReceived, this, [this, pc](int piece) {
+        logLine(LogLevel::Debug, QStringLiteral("peer %1: recv have piece %2").arg(pc->label()).arg(piece));
         m_picker->peerHas(piece);
         requestMore(pc);
     });
@@ -557,6 +587,12 @@ void TorrentTask::teardownPeers() {
     m_inflightByPeer.clear();
     m_badPieces.clear();
     m_firstBlockLogged.clear();
+
+    // Called from pause()/cancel()/maybeFinish()/forceRecheck(): a torn-down
+    // task must stop getting DhtNode::peersFound callbacks. forceRecheck()
+    // re-subscribes via beginLeeching() right after this if it resumes
+    // leeching; the shared DhtNode itself is untouched either way.
+    unsubscribeDht();
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +665,55 @@ void TorrentTask::addPeerForTest(const PeerAddress& p) {
     m_knownPeers.insert(k);
     m_pendingPeers.append(p);
     openPeers(); // no-op unless already leeching
+}
+
+// ---------------------------------------------------------------------------
+// DHT as a peer source (Task 14)
+// ---------------------------------------------------------------------------
+
+void TorrentTask::subscribeDht() {
+    unsubscribeDht(); // idempotent: never leaves two live connections to m_dht
+    if (!m_dht) return;
+    m_dhtPeersConn = connect(m_dht, &DhtNode::peersFound, this,
+        [this](const QByteArray& infoHash, const QVector<PeerAddress>& peers) {
+            // The DhtNode is shared across every torrent in the process (one
+            // instance, many lookup() walks); a walk for a DIFFERENT
+            // torrent's info_hash must not leak peers into this task.
+            if (infoHash != m_meta.infoHash) return;
+            int newCount = 0;
+            for (const auto& p : peers) {
+                const QString k = peerKey(p);
+                if (m_knownPeers.contains(k)) continue; // dedup vs. tracker/DHT/test-injected peers alike
+                m_knownPeers.insert(k);
+                m_pendingPeers.append(p);
+                ++newCount;
+            }
+            if (newCount > 0) {
+                logLine(LogLevel::Info, QStringLiteral("DHT: %1 new peer(s) (%2 reported)")
+                                            .arg(newCount).arg(peers.size()));
+            }
+            openPeers(); // no-op unless Connecting/Downloading
+        });
+}
+
+void TorrentTask::unsubscribeDht() {
+    if (m_dhtPeersConn) {
+        QObject::disconnect(m_dhtPeersConn);
+        m_dhtPeersConn = QMetaObject::Connection();
+    }
+}
+
+void TorrentTask::setDht(DhtNode* dht) {
+    if (m_dht == dht) return;
+    unsubscribeDht(); // drop any subscription to the PREVIOUS DhtNode before switching
+    m_dht = dht;       // not owned: outlives this task, shared across every TorrentTask
+    if (!m_dht) return;
+    if (m_state == DownloadState::Connecting || m_state == DownloadState::Downloading) {
+        subscribeDht();
+        m_dht->lookup(m_meta.infoHash);
+    }
+    // Not yet running: beginLeeching() subscribes + kicks off lookup() itself
+    // once start() actually enters Connecting.
 }
 
 // ---------------------------------------------------------------------------

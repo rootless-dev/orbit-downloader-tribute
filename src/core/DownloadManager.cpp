@@ -5,13 +5,91 @@
 #include "Logger.h"
 #include "torrent/TorrentTask.h"
 #include "torrent/TorrentMetainfo.h"
+#include "torrent/DhtNode.h"
+#include "torrent/NodeId.h"
+#include "torrent/MagnetUri.h"
+#include "torrent/MetadataFetch.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QNetworkAccessManager>
+#include <QRandomGenerator>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <algorithm>
+
+// Task 15: lightweight, transient AbstractTask shown in the FetchingMetadata
+// state while a MetadataFetch resolves a magnet's info dict. Its id is fixed
+// at construction (already the SAME id the eventual TorrentTask will use -
+// see addMagnet()'s doc comment), so the table model never sees the row
+// "jump" identity when the placeholder is replaced.
+//
+// Deliberately NEVER Queued: pump() only ever promotes tasks it finds in the
+// Queued state, so this can never be double-started by the concurrency
+// pump - the underlying MetadataFetch is started exactly once, directly by
+// startMetadataFetch(), independent of pump()/start() entirely. start()/
+// pause()/requeue() are therefore no-ops (nothing pump()-managed to
+// start/hold); cancel() just flips the visible state (the actual teardown -
+// stopping the MetadataFetch and dropping the m_magnetMeta entry - is
+// DownloadManager::remove()'s job, mirroring how TorrentTask's own
+// pause()/cancel() don't delete the task either).
+//
+// Defined here (not its own header) with Q_OBJECT + a trailing #include
+// "DownloadManager.moc": it is purely a DownloadManager implementation
+// detail, never named outside this file.
+class MagnetTask : public AbstractTask {
+    Q_OBJECT
+public:
+    MagnetTask(const QUuid& id, const QString& displayName, QObject* parent = nullptr)
+        : AbstractTask(parent), m_id(id), m_displayName(displayName) {}
+
+    Kind          kind() const override { return Kind::MagnetFetch; }
+    QUuid         id() const override { return m_id; }
+    DownloadState state() const override { return m_state; }
+    QString       displayName() const override { return m_displayName; }
+    qint64        totalBytes() const override { return -1; }     // unknown until metadata resolves
+    qint64        receivedBytes() const override { return 0; }
+    Priority      priority() const override { return m_priority; }
+    void          setPriority(Priority p) override { m_priority = p; }
+
+    void start() override {}
+    void pause() override {}
+    void requeue() override {}
+    void cancel() override {
+        if (m_state == DownloadState::Cancelled) return;
+        m_state = DownloadState::Cancelled;
+        emit stateChanged(m_state);
+    }
+
+    // Called from DownloadManager::onMetadataFailed(); left in FetchingMetadata
+    // rather than Error would look identical to "still trying" in the table,
+    // so surface the failure as a real state transition instead.
+    void markError() {
+        if (m_state == DownloadState::Cancelled) return;
+        m_state = DownloadState::Error;
+        emit stateChanged(m_state);
+    }
+
+private:
+    QUuid         m_id;
+    QString       m_displayName;
+    DownloadState m_state = DownloadState::FetchingMetadata;
+    Priority      m_priority = Priority::Normal;
+};
+
+namespace {
+// All file indices [0, meta.files.size()) - the "select every file" default
+// applied once a magnet resolves and the file list becomes known (both
+// addMagnet()'s own default `selectedFiles={}` and a session-restored
+// magnet, which per spec always resumes with every file, never an
+// interactive per-file dialog).
+QSet<int> allFileIndicesOf(const TorrentMetainfo& meta) {
+    QSet<int> s;
+    for (int i = 0; i < meta.files.size(); ++i) s.insert(i);
+    return s;
+}
+
+} // namespace
 
 DownloadManager::DownloadManager(const EngineConfig& cfg, const QString& dataDir,
                                  Logger* logger, QObject* parent)
@@ -28,7 +106,125 @@ DownloadManager::DownloadManager(const EngineConfig& cfg, const QString& dataDir
 
     m_torrentNam = new QNetworkAccessManager(this);   // shared by every TorrentTask (trackers)
 
+    // Task 14: one DhtNode for the whole process, shared by every TorrentTask
+    // makeTorrentTask() builds from here on. start() only binds the UDP
+    // socket (local, no traffic) - it does NOT bootstrap against the real
+    // mainline routers. Bootstrapping is real outbound DNS/UDP to third-party
+    // infrastructure, and this constructor runs for EVERY DownloadManager,
+    // including in tst_ftp/tst_download/tst_gui/tst_transport which have
+    // nothing to do with torrents: firing it unconditionally here would send
+    // every one of those tests to the real internet. The real bootstrap is
+    // deferred to startDhtBootstrap(), called only by the settings-gated
+    // wiring (Task 17: setDhtEnabled()/setDhtConfig(), called from the
+    // Preferences BitTorrent page and GUI startup) when DHT is actually
+    // enabled. Tests that need a fully offline, in-process DHT swap this
+    // default instance out via setDhtForTest() before adding any torrent.
+    // Persistent node-id/routing-table storage (dht.dat, DhtNode::saveState/
+    // loadState) is NOT wired in by Task 17 -- out of its explicit scope;
+    // still a future improvement.
+    if (m_dhtEnabled) {
+        m_dht = new DhtNode(NodeId::random(), /*port*/0,
+                            QRandomGenerator::global()->generate(), this);
+        m_dht->start();
+    }
+
     QDir().mkpath(m_dataDir);
+}
+
+DownloadManager::~DownloadManager() {
+    // §6.3: best-effort persist of the DHT node id + routing table so the
+    // NEXT startup's loadState() (see startDhtBootstrap()) restores a warm
+    // table instead of joining as a brand-new random identity every single
+    // run. Only when this manager actually owns the node (parent() == this)
+    // -- a test double installed via setDhtForTest() is caller-owned and
+    // must never be touched here, matching every other m_dht teardown site
+    // in this file (rebindDht()/setDhtEnabled(false)).
+    if (m_dht && m_dht->parent() == this)
+        m_dht->saveState(m_dataDir + "/dht.dat");
+}
+
+void DownloadManager::startDhtBootstrap() {
+    // Task 17 hook: fires the real, internet-bootstrapping DHT join. Nothing
+    // calls this yet -- wired in once DHT-enable is a real Preferences toggle.
+    if (!m_dht) return;
+    // §6.3: restore the persistent node id + warm routing-table nodes BEFORE
+    // bootstrap() joins the swarm, so this node keeps the same identity (and
+    // a head start of already-known-good peers) across restarts instead of
+    // bootstrapping from scratch every time. Harmlessly returns false (no-op)
+    // the very first time, before any dht.dat has ever been written.
+    m_dht->loadState(m_dataDir + "/dht.dat");
+    m_dht->bootstrap(DhtNode::kDefaultRouters);
+}
+
+void DownloadManager::rebindDht() {
+    // Final-review Fix I1: an in-flight MetadataFetch holds its own raw
+    // DhtNode* and a 1s retry timer that calls m_dht->lookup(...) - it must be
+    // rewired to nullptr/the new node in lockstep with every live TorrentTask,
+    // BEFORE the old node is deleted below, or the next timer tick dereferences
+    // freed memory.
+    for (auto* t : m_tasks)
+        if (auto* tt = qobject_cast<TorrentTask*>(t)) tt->setDht(nullptr);
+    for (auto* mf : m_metadataFetches) mf->setDht(nullptr);
+    if (m_dht && m_dht->parent() == this) delete m_dht;
+    m_dht = new DhtNode(NodeId::random(), m_dhtPort,
+                        QRandomGenerator::global()->generate(), this);
+    m_dht->start();
+    for (auto* t : m_tasks)
+        if (auto* tt = qobject_cast<TorrentTask*>(t)) tt->setDht(m_dht);
+    for (auto* mf : m_metadataFetches) mf->setDht(m_dht);
+}
+
+void DownloadManager::setDhtEnabled(bool enabled) {
+    m_dhtEnabled = enabled;
+    if (!enabled) {
+        if (m_dht) {
+            // Same Fix I1 rationale as rebindDht(): rewire fetches to nullptr
+            // BEFORE the delete, not after.
+            for (auto* t : m_tasks)
+                if (auto* tt = qobject_cast<TorrentTask*>(t)) tt->setDht(nullptr);
+            for (auto* mf : m_metadataFetches) mf->setDht(nullptr);
+            if (m_dht->parent() == this) delete m_dht;
+            m_dht = nullptr;
+        }
+        return;
+    }
+    // Turning on (or re-confirming): make sure a node exists and is actually
+    // bound to the configured port -- the constructor's default instance (if
+    // any) was bound ephemeral (port 0), never the settings-configured one.
+    if (!m_dht || m_dht->boundPort() != m_dhtPort) rebindDht();
+    startDhtBootstrap();
+}
+
+void DownloadManager::setDhtPort(quint16 port) {
+    m_dhtPort = port;
+    if (m_dhtEnabled && (!m_dht || m_dht->boundPort() != m_dhtPort)) {
+        rebindDht();
+        startDhtBootstrap();
+    }
+}
+
+void DownloadManager::setDhtConfig(bool enabled, quint16 port) {
+    m_dhtPort = port;       // set BEFORE setDhtEnabled() so a fresh/rebound node lands on it directly
+    setDhtEnabled(enabled);
+}
+
+int DownloadManager::dhtNodeCount() const {
+    return m_dht ? m_dht->nodeCount() : 0;
+}
+
+void DownloadManager::setDhtForTest(DhtNode* dht) {
+    // Precondition (see the declaration's contract): must be called before any
+    // task exists. A TorrentTask already built via makeTorrentTask() keeps
+    // pointing at (and stays subscribed to) whatever m_dht existed when it was
+    // made, so replacing m_dht afterwards would silently orphan that task's
+    // DHT subscription instead of re-wiring it.
+    Q_ASSERT(m_tasks.isEmpty());
+    // Safe to delete unconditionally: this is only ever the DEFAULT instance
+    // created above (still parented to `this`, never yet handed to any
+    // TorrentTask via makeTorrentTask() when called per its documented
+    // precondition), never a previously test-injected one.
+    if (m_dht && m_dht->parent() == this) delete m_dht;
+    m_dht = dht; // not owned -- the caller keeps it alive
 }
 
 Transport* DownloadManager::transportFor(const QUrl& url) const {
@@ -107,10 +303,12 @@ QString DownloadManager::torrentsSessionPath() const { return m_dataDir + "/torr
 
 TorrentTask* DownloadManager::makeTorrentTask(const TorrentMetainfo& meta, const QString& destDir,
                                               const QSet<int>& selectedFiles, PieceStrategy strategy) {
-    return new TorrentTask(meta, destDir, selectedFiles, strategy,
-                           m_torrentListenPort, m_torrentMaxPeers, m_torrentVerify,
-                           seedFromInfoHash(meta.infoHash),
-                           m_torrentNam, &m_limiter, m_logger, torrentsDir(), this);
+    auto* t = new TorrentTask(meta, destDir, selectedFiles, strategy,
+                              m_torrentListenPort, m_torrentMaxPeers, m_torrentVerify,
+                              seedFromInfoHash(meta.infoHash),
+                              m_torrentNam, &m_limiter, m_logger, torrentsDir(), this);
+    if (m_dht) t->setDht(m_dht); // Task 14: DHT as a peer source, when one exists
+    return t;
 }
 
 void DownloadManager::setTorrentDefaults(int maxPeersPerTorrent, quint16 listenPort,
@@ -149,6 +347,107 @@ QUuid DownloadManager::addTorrent(const QString& torrentPath, const QString& des
     saveSession();
     pump();
     return t->id();
+}
+
+QUuid DownloadManager::addMagnet(const QString& uri, const QString& destDir, PieceStrategy strategy,
+                                 const QVector<int>& selectedFiles) {
+    const MagnetInfo mi = MagnetUri::parse(uri);
+    if (!mi.isValid()) return QUuid();     // malformed magnet: nothing added (mirrors addTorrent())
+
+    // Same derivation TorrentTask's ctor uses (infoHash.left(16) ->
+    // fromRfc4122) -- since MetadataFetch's resolved TorrentMetainfo::infoHash
+    // is guaranteed equal to this magnet's info-hash (PeerConnection already
+    // SHA-1-verified the peer-served info dict against it before
+    // MetadataFetch ever emits metainfoReady), the TorrentTask
+    // onMetadataReady() builds derives this EXACT id, so callers never see
+    // the id change out from under them across the fetch.
+    const QUuid id = QUuid::fromRfc4122(mi.infoHash.left(16));
+    if (taskById(id)) return id;   // dedup: a torrent OR in-flight magnet fetch already covers this info-hash
+
+    QSet<int> sel;
+    for (int i : selectedFiles) sel.insert(i);
+    startMetadataFetch(id, mi, destDir, sel, strategy);
+    saveSession();    // persist the new unresolved-magnet entry (torrents.json) right away
+    return id;
+}
+
+void DownloadManager::startMetadataFetch(const QUuid& id, const MagnetInfo& mi, const QString& destDir,
+                                         const QSet<int>& selectedFiles, PieceStrategy strategy) {
+    m_magnetMeta.insert(id, MagnetSessionMeta{mi, destDir, selectedFiles, strategy});
+
+    const QString label = mi.displayName.isEmpty()
+        ? QStringLiteral("Magnet %1").arg(QString::fromLatin1(mi.infoHash.toHex()))
+        : mi.displayName;
+    auto* placeholder = new MagnetTask(id, label, this);
+    wire(placeholder);
+    m_tasks.append(placeholder);
+
+    auto* fetch = new MetadataFetch(mi, m_dht, m_torrentNam, seedFromInfoHash(mi.infoHash),
+                                    &m_limiter, this);
+    m_metadataFetches.insert(id, fetch);
+    connect(fetch, &MetadataFetch::metainfoReady, this,
+            [this, id](TorrentMetainfo meta, QByteArray infoDict) { onMetadataReady(id, meta, infoDict); });
+    connect(fetch, &MetadataFetch::failed, this,
+            [this, id](QString reason) { onMetadataFailed(id, reason); });
+    fetch->start();
+}
+
+void DownloadManager::onMetadataReady(const QUuid& id, const TorrentMetainfo& meta, const QByteArray& infoDict) {
+    if (!m_magnetMeta.contains(id)) return;   // remove()d while the fetch was still in flight: ignore
+    const MagnetSessionMeta sm = m_magnetMeta.take(id);
+
+    // Tear down the MetadataFetch that just fired this signal - deleteLater(),
+    // never a synchronous delete, since we're inside its own emit right now
+    // (mirrors MetadataFetch::onMetadataComplete's own teardown of its
+    // in-flight PeerConnections for the identical reason).
+    if (auto* fetch = m_metadataFetches.take(id)) fetch->deleteLater();
+
+    // Cache the resolved torrent so a restart can adopt it without re-running
+    // MetadataFetch. MUST splice in the verbatim, SHA-1-verified `infoDict`
+    // (via wrapInfoDictAsTorrent) rather than re-encode from `meta`'s own
+    // fields: any info-dict key TorrentMetainfo::parse doesn't extract
+    // (BEP 27 "private", "source", per-file "md5sum", ...) would otherwise be
+    // silently dropped, changing the cached file's re-derived info-hash on a
+    // future loadTorrentSession() and corrupting the restored task's identity.
+    const QString hex = QString::fromLatin1(meta.infoHash.toHex());
+    QDir().mkpath(torrentsDir());
+    Persistence::writeFileAtomic(torrentsDir() + "/" + hex + ".torrent",
+                                 TorrentMetainfo::wrapInfoDictAsTorrent(infoDict, sm.info.trackers));
+
+    // Replace the transient FetchingMetadata placeholder with the real
+    // TorrentTask, which takes over the exact same id (both derive it from
+    // meta.infoHash the same way; see addMagnet()'s doc comment).
+    for (int i = 0; i < m_tasks.size(); ++i) {
+        if (m_tasks[i]->id() != id) continue;
+        m_tasks[i]->deleteLater();
+        m_tasks.removeAt(i);
+        break;
+    }
+
+    const QSet<int> selectedFiles = sm.selectedFiles.isEmpty() ? allFileIndicesOf(meta) : sm.selectedFiles;
+    auto* t = makeTorrentTask(meta, sm.destDir, selectedFiles, sm.strategy);
+    wire(t);
+    m_tasks.append(t);
+    m_torrentMeta.insert(t->id(), TorrentSessionMeta{sm.destDir, selectedFiles, sm.strategy});
+    saveSession();
+    pump();
+    // Final-review Fix C1: fires AFTER the swap above (placeholder removed
+    // from m_tasks + deleteLater()'d, new TorrentTask appended+wired), so any
+    // observer's taskById(id)/tasks() lookup made in response to this signal
+    // already sees the new task, never the placeholder mid-teardown.
+    emit taskReplaced(id);
+}
+
+void DownloadManager::onMetadataFailed(const QUuid& id, const QString& reason) {
+    if (!m_magnetMeta.contains(id)) return;   // remove()d while the fetch was still in flight: ignore
+    if (auto* fetch = m_metadataFetches.take(id)) fetch->deleteLater();
+    if (m_logger) m_logger->logApp(LogLevel::Warn,
+        QStringLiteral("magnet %1: metadata fetch failed - %2")
+            .arg(QString::fromLatin1(m_magnetMeta.value(id).info.infoHash.toHex()), reason));
+    // m_magnetMeta intentionally KEPT (still persisted to torrents.json, still
+    // retried on the next loadSession()) -- a transient DHT/tracker failure
+    // shouldn't permanently orphan a magnet the user added.
+    if (auto* mt = qobject_cast<MagnetTask*>(taskById(id))) mt->markError();
 }
 
 void DownloadManager::pump() {
@@ -390,6 +689,17 @@ void DownloadManager::remove(const QUuid& id, bool deleteFiles) {
 
         m_tasks.removeAt(i);
         m_torrentMeta.remove(id);   // no-op for non-torrent tasks
+        // Task 15: an unresolved/errored magnet may still have a MetadataFetch
+        // running in the background (DHT lookup / peer connections) even
+        // though its transient placeholder is being removed right here -
+        // stop it and drop the session-persisted entry, or (a) a fetch that
+        // completes AFTER this would silently resurrect a TorrentTask for a
+        // magnet the user just removed (onMetadataReady()/onMetadataFailed()
+        // guard against exactly that by checking m_magnetMeta first), and
+        // (b) the stale entry would keep reappearing in torrents.json on
+        // every future session forever. No-op for a non-magnet id.
+        m_magnetMeta.remove(id);
+        if (auto* fetch = m_metadataFetches.take(id)) fetch->deleteLater();
         t->deleteLater();
 
         if (isTorrent) {
@@ -449,6 +759,31 @@ void DownloadManager::saveTorrentSession() {
             {"strategy", strategyToString(meta.strategy)},
             {"state", int(tt->state())}});
     }
+    // Task 15: unresolved magnets round-trip through the SAME torrents.json
+    // array, tagged {"magnet": true}, keyed by m_magnetMeta (NOT m_tasks/
+    // qobject_cast<MagnetTask*>): m_magnetMeta is the authoritative "still
+    // unresolved" set - it's exactly the entries onMetadataReady() hasn't
+    // taken() yet (resolved ones already became normal TorrentTask/
+    // m_torrentMeta entries, written by the loop above instead) and remove()
+    // has already erased. No "state" field: every unresolved magnet - freshly
+    // added, mid-fetch, or errored - is retried unconditionally on the next
+    // loadTorrentSession() (see there); there's no terminal state for a
+    // magnet worth distinguishing the way Completed is for a torrent.
+    for (auto it = m_magnetMeta.constBegin(); it != m_magnetMeta.constEnd(); ++it) {
+        const MagnetSessionMeta& mm = it.value();
+        QJsonArray sel;
+        for (int i : mm.selectedFiles) sel.append(i);
+        QJsonArray trackers;
+        for (const QString& tr : mm.info.trackers) trackers.append(tr);
+        arr.append(QJsonObject{
+            {"magnet", true},
+            {"infoHash", QString::fromLatin1(mm.info.infoHash.toHex())},
+            {"displayName", mm.info.displayName},
+            {"trackers", trackers},
+            {"destDir", mm.destDir},
+            {"selectedFiles", sel},
+            {"strategy", strategyToString(mm.strategy)}});
+    }
     // Don't materialize an (empty-array) torrents.json for the common
     // pure-HTTP/FTP user who has never added a torrent - only start writing
     // it once there's at least one torrent to record. But if the file
@@ -465,6 +800,32 @@ void DownloadManager::loadTorrentSession() {
     const QJsonObject root = Persistence::readJsonObject(torrentsSessionPath());
     for (const QJsonValue& v : root.value("torrents").toArray()) {
         const QJsonObject o = v.toObject();
+
+        // Task 15: an unresolved magnet - restart its MetadataFetch instead of
+        // reading a stored .torrent (there isn't one yet). Always resumes
+        // with ALL files: selectedFiles isn't even round-tripped for these
+        // entries (see saveTorrentSession()) since a per-file choice only
+        // makes sense as an interactive GUI dialog once the file list is
+        // actually known, which restoring a session at startup never is.
+        if (o.value("magnet").toBool(false)) {
+            MagnetInfo mi;
+            mi.infoHash = QByteArray::fromHex(o.value("infoHash").toString().toLatin1());
+            mi.displayName = o.value("displayName").toString();
+            for (const QJsonValue& tv : o.value("trackers").toArray())
+                mi.trackers.append(tv.toString());
+            if (!mi.isValid()) {
+                if (m_logger) m_logger->logApp(LogLevel::Warn,
+                    QStringLiteral("session: magnet entry skipped - invalid info-hash"));
+                continue;
+            }
+            const QUuid id = QUuid::fromRfc4122(mi.infoHash.left(16));
+            if (taskById(id)) continue;   // already present -- shouldn't normally happen, but dedup anyway
+            startMetadataFetch(id, mi, o.value("destDir").toString(),
+                              /*selectedFiles*/ QSet<int>{},
+                              strategyFromString(o.value("strategy").toString()));
+            continue;
+        }
+
         const QString hex = o.value("infoHash").toString();
         const QString destDir = o.value("destDir").toString();
         const PieceStrategy strategy = strategyFromString(o.value("strategy").toString());
@@ -550,3 +911,8 @@ void DownloadManager::setConfig(const EngineConfig& cfg) {
     m_limiter.setRate(cfg.maxBytesPerSec);   // banda: ao vivo
     pump();                                  // cap de concorrência: ao vivo
 }
+
+// MagnetTask (above) has Q_OBJECT and is defined entirely in this .cpp (it's
+// a pure implementation detail, never named outside this file) - AUTOMOC
+// needs this explicit include to generate/compile its moc.
+#include "DownloadManager.moc"

@@ -21,6 +21,23 @@ enum MessageId {
     Request = 6,
     Piece = 7,
     Cancel = 8,
+
+    // BEP 6 (Fast Extension) message ids. We never negotiate the fast
+    // extension (our handshake's reserved bytes are all zero), yet real
+    // seeds still send have_all/have_none in place of a bitfield. We must
+    // understand these two or we mistake a full seed for a peer that holds
+    // nothing — the peer's bitfield stays empty and the picker starves. The
+    // remaining fast-extension ids (suggest=13, reject=16, allowed_fast=17)
+    // stay ignored: without negotiation a peer shouldn't send them, and we
+    // serve nothing.
+    HaveAll = 14,
+    HaveNone = 15,
+
+    // BEP 10 (Extension Protocol). All extension messages share id 20; a
+    // second byte (the "extended message id") distinguishes them: 0 is
+    // reserved for the handshake itself, other values are negotiated per
+    // peer via the handshake's "m" dict (e.g. ut_metadata, Task 12).
+    Extended = 20,
 };
 
 // Handshake length is fixed: 1 (pstrlen) + 19 (pstr) + 8 (reserved) + 20
@@ -33,8 +50,11 @@ constexpr int kHandshakeSize = 68;
 // KiB) with headroom.
 constexpr int kMaxMessageLength = 2 * 1024 * 1024;
 
-// Builds our 68-byte handshake: <19>"BitTorrent protocol"<8 zero
+// Builds our 68-byte handshake: <19>"BitTorrent protocol"<8 reserved
 // bytes><infoHash><peerId>. infoHash and peerId must each be 20 bytes.
+// Reserved bytes advertise our support for the extension protocol (BEP 10:
+// byte[5] bit 0x10) and DHT (BEP 5: byte[7] bit 0x01) — the only two
+// extensions we negotiate; every other bit stays zero.
 QByteArray handshake(const QByteArray& infoHash, const QByteArray& peerId);
 
 // One parsed peer-wire message. id == -1 marks a keep-alive (zero-length
@@ -62,5 +82,28 @@ QByteArray interested();
 
 // request (id=6): <0013><6><piece:4be><begin:4be><length:4be> — 17 bytes.
 QByteArray request(int piece, qint64 begin, qint64 length);
+
+// Our BEP 10 extended handshake (id=20, ext-id=0): a bencoded dict
+// advertising the extensions we support and our locally-chosen id for
+// each, e.g. d1:md11:ut_metadatai<utMetadataId>eee. Framed as
+// <len:4be><20><0><bencoded payload>.
+QByteArray extendedHandshakeMsg(int utMetadataId);
+
+// Parses a peer's BEP 10 extended handshake payload (the bencoded dict
+// that follows the ext-id byte 0 — NOT including the outer message
+// length/id/ext-id). Reads m.ut_metadata (the peer's chosen id for the
+// ut_metadata extension) and the top-level metadata_size. Malformed input
+// or missing keys yield 0 for the corresponding out-param rather than
+// failing — a peer that doesn't support an extension simply omits it.
+// Returns false only on payloads that don't even bdecode to a dict (out
+// params are still set to 0 in that case).
+bool parseExtendedHandshake(const QByteArray& payload, int* utMetadataId, int* metadataSize);
+
+// A BEP 9 ut_metadata "request" message (msg_type 0): asks for piece number
+// `piece` of the info dict. `extId` is the PEER's chosen id for the
+// ut_metadata extension (learned from its extended handshake) — every
+// ut_metadata message is addressed to whichever id its recipient announced.
+// Framed as <len:4be><20><extId><bencoded {msg_type:0,piece:N}>>.
+QByteArray utMetadataRequest(int extId, int piece);
 
 } // namespace PeerWire

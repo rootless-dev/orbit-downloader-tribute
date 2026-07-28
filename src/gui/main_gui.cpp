@@ -51,6 +51,13 @@ int main(int argc, char** argv) {
     // struct) — apply BEFORE loadSession() so resumed torrents honor them too.
     mgr.setTorrentDefaults(settings.bittorrent.maxPeersPerTorrent,
                             settings.bittorrent.listenPort, settings.bittorrent.verify);
+    // Task 17: the ctor always starts a DhtNode (bound ephemeral, NOT
+    // bootstrapped -- see DownloadManager's ctor comment); apply the
+    // persisted enable/port here, before loadSession(), so restored torrents
+    // get wired to the settings-configured node (or none, if DHT is off) from
+    // the start rather than the ctor's default. setDhtEnabled(true) is what
+    // actually fires the real internet bootstrap.
+    mgr.setDhtConfig(settings.dht.enabled, settings.dht.port);
     mgr.loadSession();                    // restore tasks BEFORE building the model
     DownloadTableModel model(&mgr);       // ctor seeds rows from mgr.tasks()
 

@@ -246,6 +246,86 @@ private slots:
         QCOMPARE(m.announceList[0].size(), 1);
         QCOMPARE(m.announceList[0][0], QUrl("http://tracker.example/announce"));
     }
+
+    // Task 13: TorrentMetainfo::fromInfoDict wraps a RAW info dict (as
+    // recovered from a magnet-link peer) verbatim -- the resulting infoHash
+    // must equal SHA1(infoDict) exactly, whatever the trackers list is.
+    void fromInfoDict_infoHashMatchesRawDictSha1() {
+        QByteArray pieces(40, '\x22'); // two piece hashes
+        QMap<QByteArray, BencodeValue> info;
+        info.insert("length", BencodeValue::makeInt(200));
+        info.insert("name", BencodeValue::makeBytes("magnet-file"));
+        info.insert("piece length", BencodeValue::makeInt(100));
+        info.insert("pieces", BencodeValue::makeBytes(pieces));
+        const QByteArray infoDict = Bencode::encode(BencodeValue::makeDict(info));
+        const QByteArray expectedHash = QCryptographicHash::hash(infoDict, QCryptographicHash::Sha1);
+
+        const QStringList trackers = {"http://tracker.example/announce", "udp://backup.example:9"};
+        const TorrentMetainfo m = TorrentMetainfo::fromInfoDict(infoDict, trackers);
+
+        QCOMPARE(m.infoHash, expectedHash);
+        QCOMPARE(m.name, QStringLiteral("magnet-file"));
+        QCOMPARE(m.pieceHashes.size(), 2);
+        QCOMPARE(m.totalLength, qint64(200));
+        QCOMPARE(m.announceList.size(), 1);
+        QCOMPARE(m.announceList[0].size(), 2);
+        QCOMPARE(m.announceList[0][0], QUrl("http://tracker.example/announce"));
+        QCOMPARE(m.announceList[0][1], QUrl("udp://backup.example:9"));
+    }
+
+    // No trackers at all (a DHT-only magnet): fromInfoDict must still
+    // succeed and hash correctly -- "announce" is present but empty.
+    void fromInfoDict_noTrackers_stillHashesCorrectly() {
+        QByteArray pieces(20, '\x33');
+        QMap<QByteArray, BencodeValue> info;
+        info.insert("length", BencodeValue::makeInt(50));
+        info.insert("name", BencodeValue::makeBytes("dht-only-file"));
+        info.insert("piece length", BencodeValue::makeInt(50));
+        info.insert("pieces", BencodeValue::makeBytes(pieces));
+        const QByteArray infoDict = Bencode::encode(BencodeValue::makeDict(info));
+        const QByteArray expectedHash = QCryptographicHash::hash(infoDict, QCryptographicHash::Sha1);
+
+        const TorrentMetainfo m = TorrentMetainfo::fromInfoDict(infoDict, QStringList());
+
+        QCOMPARE(m.infoHash, expectedHash);
+        QCOMPARE(m.pieceHashes.size(), 1);
+    }
+
+    // Regression (Task 15 verbatim-cache fix): an info dict carrying a key
+    // TorrentMetainfo::parse doesn't itself extract into any TorrentMetainfo
+    // field (here BEP 27's "private", but the same applies to "source",
+    // per-file "md5sum", any BEP 47/52 key, ...) must STILL round-trip its
+    // info-hash correctly through wrapInfoDictAsTorrent(). Reconstructing the
+    // .torrent bytes from a parsed TorrentMetainfo's fields (the OLD
+    // DownloadManager::encodeInfoDict/encodeTorrentBytes approach this
+    // replaces) would silently drop "private", change the re-encoded bytes,
+    // and thus change the re-derived info-hash -- this test would FAIL under
+    // that approach; wrapInfoDictAsTorrent splices the ORIGINAL bytes in
+    // verbatim, so it can't lose keys it doesn't understand.
+    void wrapInfoDictAsTorrent_preservesUnknownKeys() {
+        QByteArray pieces(20, '\x44');
+        QMap<QByteArray, BencodeValue> info;
+        info.insert("length", BencodeValue::makeInt(64));
+        info.insert("name", BencodeValue::makeBytes("private-torrent"));
+        info.insert("piece length", BencodeValue::makeInt(64));
+        info.insert("pieces", BencodeValue::makeBytes(pieces));
+        info.insert("private", BencodeValue::makeInt(1)); // unrecognized by TorrentMetainfo::parse
+        const QByteArray infoDict = Bencode::encode(BencodeValue::makeDict(info));
+        const QByteArray ih = QCryptographicHash::hash(infoDict, QCryptographicHash::Sha1);
+
+        const QByteArray wrapped =
+            TorrentMetainfo::wrapInfoDictAsTorrent(infoDict, QStringList{"http://tracker.example/announce"});
+
+        bool ok = false; QString err;
+        const TorrentMetainfo m = TorrentMetainfo::parse(wrapped, &ok, &err);
+        QVERIFY2(ok, qPrintable(err));
+        QCOMPARE(m.infoHash, ih);
+
+        // fromInfoDict shares the same wrapping code path, so it must agree.
+        const TorrentMetainfo m2 =
+            TorrentMetainfo::fromInfoDict(infoDict, QStringList{"http://tracker.example/announce"});
+        QCOMPARE(m2.infoHash, ih);
+    }
 };
 QTEST_MAIN(TstMetainfo)
 #include "tst_metainfo.moc"

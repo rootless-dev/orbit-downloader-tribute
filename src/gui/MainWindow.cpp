@@ -4,6 +4,7 @@
 #include "DownloadTask.h"
 #include "torrent/TorrentTask.h"
 #include "torrent/TorrentMetainfo.h"
+#include "torrent/MagnetUri.h"
 #include "TorrentOpenDialog.h"
 #include "DownloadTableModel.h"
 #include "CategoryFilterProxy.h"
@@ -35,8 +36,10 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenu>
 #include <QIcon>
 #include <QStyle>
@@ -164,6 +167,16 @@ MainWindow::MainWindow(DownloadManager* mgr, DownloadTableModel* model,
     connect(m_mgr, &DownloadManager::taskStateChanged, this,
         [this](const QUuid& id, DownloadState s){ onStateChanged(id, int(s)); });
 
+    // Final-review Fix C1: DownloadManager::onMetadataReady() deleteLater()s
+    // the transient MagnetTask placeholder and appends a brand-new
+    // TorrentTask under the SAME id - m_model's Row::task still points at the
+    // (about-to-be-freed) placeholder until re-pointed here. Re-target rather
+    // than remove+re-append: that would reorder the table and drop the row's
+    // current selection for no reason, when the id (and thus the row) hasn't
+    // actually changed.
+    connect(m_mgr, &DownloadManager::taskReplaced, this,
+        [this](const QUuid& id) { m_model->retargetTask(id, m_mgr->taskById(id)); });
+
     connect(m_mgr, &DownloadManager::credentialsRequired,
             this, &MainWindow::onCredentialsRequired);
 
@@ -201,6 +214,7 @@ MainWindow::MainWindow(DownloadManager* mgr, DownloadTableModel* model,
 
     m_clip = new ClipboardWatcher(this);
     connect(m_clip, &ClipboardWatcher::urlDetected, this, &MainWindow::onClipboardUrl);
+    connect(m_clip, &ClipboardWatcher::magnetDetected, this, &MainWindow::onClipboardMagnet);
 
     // ---- Barra de menus completa (nativa: no macOS os menus vão para o topo da
     // tela e Preferences/Quit/About são realocados para o menu do app pelo Qt).
@@ -213,6 +227,8 @@ MainWindow::MainWindow(DownloadManager* mgr, DownloadTableModel* model,
     file->addAction(aNew);                        // reusa "New" do toolbar
     QAction* aOpenTorrent = file->addAction(tr("Open Torrent…"));
     connect(aOpenTorrent, &QAction::triggered, this, &MainWindow::onOpenTorrent);
+    QAction* aOpenMagnet = file->addAction(tr("Open Magnet…"));
+    connect(aOpenMagnet, &QAction::triggered, this, &MainWindow::onOpenMagnet);
     QAction* aOpenFolder = file->addAction(tr("Open downloads folder"));
     connect(aOpenFolder, &QAction::triggered, this, [this]{
         QDesktopServices::openUrl(QUrl::fromLocalFile(defaultDir()));
@@ -307,6 +323,15 @@ QString MainWindow::defaultDir() const {
 void MainWindow::addUrlViaDialog(const QUrl& prefill) {
     NewDownloadDialog d(this, prefill);
     if (d.exec() != QDialog::Accepted) return;
+    // Task 16: a pasted magnet: string in the URL field routes to addMagnet
+    // instead of the HTTP path — only the destination folder applies (no
+    // per-file name/type: those are HTTP-probe concepts the magnet doesn't have).
+    const QString magnet = d.magnetUri();
+    if (!magnet.isEmpty()) {
+        m_lastDir = d.destDir();
+        addMagnetTask(magnet);
+        return;
+    }
     // A pasta escolhida vira a padrão desta sessão (drop múltiplo usa).
     m_lastDir = QFileInfo(d.destPath()).absolutePath();
     const QUuid id = m_mgr->addDownload(d.url(), d.destPath());
@@ -359,6 +384,44 @@ void MainWindow::openTorrentFile(const QString& path) {
     if (!inModel) m_model->appendTask(task);
 }
 
+// File > Open Magnet…: prompts for a magnet: URI (pre-filled from the
+// clipboard when it already holds one), then routes through openMagnet().
+void MainWindow::onOpenMagnet() {
+    QString prefill;
+    const QString clip = QGuiApplication::clipboard()->text().trimmed();
+    if (MagnetUri::parse(clip).isValid()) prefill = clip;
+    bool ok = false;
+    const QString text = QInputDialog::getText(this, tr("Open Magnet"), tr("Magnet URI:"),
+                                               QLineEdit::Normal, prefill, &ok).trimmed();
+    if (!ok || text.isEmpty()) return;
+    openMagnet(text);
+}
+
+// Shared magnet entry point (menu, drag&drop, clipboard Auto/Ask-after-
+// confirm/Notify-after-click): validates via MagnetUri::parse and hands off
+// to addMagnetTask(); a small warning on an invalid link, mirroring
+// openTorrentFile()'s error box.
+void MainWindow::openMagnet(const QString& uri) {
+    if (addMagnetTask(uri).isNull())
+        QMessageBox::warning(this, tr("Open Magnet"), tr("This is not a valid magnet link."));
+}
+
+// Shared addMagnet + model-append plumbing (menu/drag&drop/clipboard all use
+// this). addMagnet() itself dedups by info-hash-derived id (same contract as
+// addTorrent()'s dedup): only append a row if this id isn't already shown.
+// A malformed/duplicate magnet flows straight through as addMagnet()'s null
+// id / existing id respectively — callers decide whether that's worth a warning.
+QUuid MainWindow::addMagnetTask(const QString& uri) {
+    const QUuid id = m_mgr->addMagnet(uri, defaultDir(), m_settings.bittorrent.defaultStrategy);
+    if (id.isNull()) return id;
+    AbstractTask* task = m_mgr->taskById(id);
+    bool inModel = false;
+    for (int r = 0; r < m_model->rowCount(); ++r)
+        if (m_model->taskAt(r) == task) { inModel = true; break; }
+    if (!inModel) m_model->appendTask(task);
+    return id;
+}
+
 void MainWindow::enqueue(const QUrl& url, const QString& dir) {
     // provisionalName=true: o nome saiu da URL (palpite) — o motor adota o
     // Content-Disposition do servidor se houver (clipboard/drag).
@@ -377,8 +440,28 @@ static QString droppedTorrentPath(const QMimeData* mime) {
     return {};
 }
 
+// A dropped magnet: link isn't a downloadable URL scheme either (no host) -
+// extractUrls() would reject it same as it does .torrent's file://. Checked
+// as raw text first (MagnetUri::parse() works off the exact string, not a
+// QUrl round-trip - preserves the query exactly as copied) with the urls()
+// list as a fallback for platforms that only ever hand drops over as QUrl.
+static QString droppedMagnetUri(const QMimeData* mime) {
+    if (!mime) return {};
+    if (mime->hasText()) {
+        const QString t = mime->text().trimmed();
+        if (MagnetUri::parse(t).isValid()) return t;
+    }
+    if (mime->hasUrls())
+        for (const QUrl& u : mime->urls()) {
+            const QString s = u.toString();
+            if (MagnetUri::parse(s).isValid()) return s;
+        }
+    return {};
+}
+
 void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
-    if (!extractUrls(e->mimeData()).isEmpty() || !droppedTorrentPath(e->mimeData()).isEmpty())
+    if (!extractUrls(e->mimeData()).isEmpty() || !droppedTorrentPath(e->mimeData()).isEmpty()
+        || !droppedMagnetUri(e->mimeData()).isEmpty())
         e->acceptProposedAction();
 }
 
@@ -388,6 +471,14 @@ void MainWindow::dropEvent(QDropEvent* e) {
     if (!torrentPath.isEmpty()) {
         e->acceptProposedAction();
         openTorrentFile(torrentPath);
+        return;
+    }
+
+    // A dropped magnet: link routes to addMagnet, same idea.
+    const QString magnetUri = droppedMagnetUri(e->mimeData());
+    if (!magnetUri.isEmpty()) {
+        e->acceptProposedAction();
+        openMagnet(magnetUri);
         return;
     }
 
@@ -619,11 +710,14 @@ void MainWindow::refreshProperties() {
 void MainWindow::onStateChanged(const QUuid& id, int state) {
     DownloadTask* t = qobject_cast<DownloadTask*>(m_mgr->taskById(id));
     const QString name = t ? QFileInfo(t->record().destPath).fileName() : id.toString();
-    static const char* names[] = {"Queued","Connecting","Downloading","Paused",
-                                  "Completed","Error","Cancelled","Checking"};
+    // Fix Minor: was a local 8-entry names[] array indexed by `state` -
+    // DownloadState::FetchingMetadata == 8 (Task 15) reads one past the end.
+    // stateName() (DownloadTypes.h) is the canonical state->text helper,
+    // already used by DownloadManager::wire()'s own logging and by
+    // DownloadTableModel's Status column.
     if (m_logger)
         m_logger->logApp(state == int(DownloadState::Error) ? LogLevel::Error : LogLevel::Info,
-                         QString("%1 -> %2").arg(name, names[state]));
+                         QString("%1 -> %2").arg(name, stateName(DownloadState(state))));
     if (state == int(DownloadState::Completed) && t && m_tray) {
         m_lastCompletedPath = t->record().destPath;
         m_tray->showMessage(tr("Download complete"), name,
@@ -649,6 +743,32 @@ void MainWindow::onClipboardUrl(const QUrl& url) {
             return;
         case ClipboardMode::Notify:
             showLinkNotification(url);
+            return;
+    }
+}
+
+// Mirrors onClipboardUrl()'s mode switch for magnet: links (Task 16). Ask
+// asks explicitly (a magnet has no NewDownloadDialog-style confirm step of
+// its own - unlike a link, addMagnet() would already be resolving by the
+// time any such dialog opened) rather than reusing receiveLink()'s
+// background-then-confirm dance.
+void MainWindow::onClipboardMagnet(const QString& uri) {
+    switch (m_clip->mode()) {
+        case ClipboardMode::Off:
+            return;
+        case ClipboardMode::Ask: {
+            const MagnetInfo mi = MagnetUri::parse(uri);
+            const QString label = mi.displayName.isEmpty() ? uri : mi.displayName;
+            if (QMessageBox::question(this, tr("Magnet link detected"),
+                    tr("Add this magnet link?\n\n%1").arg(label)) == QMessageBox::Yes)
+                addMagnetTask(uri);
+            return;
+        }
+        case ClipboardMode::Auto:
+            addMagnetTask(uri);
+            return;
+        case ClipboardMode::Notify:
+            showMagnetNotification(uri);
             return;
     }
 }
@@ -684,6 +804,27 @@ void MainWindow::clearLinkNotification() {
     statusBar()->removeWidget(m_notice);
     m_notice->deleteLater();
     m_notice = nullptr;
+}
+
+// Notify-mode counterpart of showLinkNotification() for magnet: links
+// (Task 16): same clickable-QLabel-in-the-status-bar mechanism, but clicking
+// it calls addMagnetTask() instead of receiveLink().
+void MainWindow::showMagnetNotification(const QString& uri) {
+    if (m_notice) { statusBar()->removeWidget(m_notice); m_notice->deleteLater(); }
+
+    const MagnetInfo mi = MagnetUri::parse(uri);
+    const QString label = mi.displayName.isEmpty() ? uri : mi.displayName;
+    m_notice = new QLabel(tr("Magnet link detected: <a href=\"#\">%1</a>")
+                              .arg(label.toHtmlEscaped()), this);
+    m_notice->setTextFormat(Qt::RichText);
+    statusBar()->addWidget(m_notice);
+    m_notice->show();
+
+    connect(m_notice, &QLabel::linkActivated, this, [this, uri] {
+        clearLinkNotification();
+        addMagnetTask(uri);
+    });
+    QTimer::singleShot(8000, this, &MainWindow::clearLinkNotification);
 }
 
 ClipboardMode MainWindow::clipModeForTest() const { return m_clip->mode(); }
@@ -832,7 +973,7 @@ void MainWindow::applySchedulerConfig(const SchedulerConfig& sc) {
 }
 
 void MainWindow::onScheduler() {
-    PreferencesDialog dlg(m_settings, this);
+    PreferencesDialog dlg(m_settings, this, m_mgr->dhtNodeCount());
     dlg.setInitialCategory(PreferencesDialog::Category::Scheduler);
     if (dlg.exec() != QDialog::Accepted) return;
     applyPreferencesResult(dlg.result());
@@ -883,7 +1024,7 @@ void MainWindow::quitApp() {
 }
 
 void MainWindow::onPreferences() {
-    PreferencesDialog dlg(m_settings, this);
+    PreferencesDialog dlg(m_settings, this, m_mgr->dhtNodeCount());
     if (dlg.exec() != QDialog::Accepted) return;
     applyPreferencesResult(dlg.result());
 }
@@ -892,11 +1033,18 @@ void MainWindow::applyPreferencesResult(const AppSettings& r) {
     const bool wantAutostart = r.ui.startAtLogin;
     const bool hadAutostart  = m_settings.ui.startAtLogin;
     const bool scheduleChanged = !(m_settings.scheduler == r.scheduler);
+    const bool dhtChanged      = !(m_settings.dht == r.dht);
     m_settings = r;
     applyTheme(m_settings.ui.theme);              // aplica o tema ao vivo (onPreferences não passa por applySettings)
     m_mgr->setConfig(m_settings.engine);
     m_mgr->setTorrentDefaults(m_settings.bittorrent.maxPeersPerTorrent,
                               m_settings.bittorrent.listenPort, m_settings.bittorrent.verify);
+    // Task 17: only touch the shared DhtNode when the DHT block actually
+    // changed -- setDhtEnabled(true)/setDhtPort() fire a REAL internet
+    // bootstrap (DNS + UDP to DhtNode::kDefaultRouters), so re-running them on
+    // every single Preferences "OK" (even one that only tweaked the theme)
+    // would needlessly re-bootstrap each time.
+    if (dhtChanged) m_mgr->setDhtConfig(m_settings.dht.enabled, m_settings.dht.port);
     applyBrowserBridge(m_settings.browser);
     if (scheduleChanged)                          // só re-arma (e dá o tick imediato) se o agendamento mudou
         applySchedulerConfig(m_settings.scheduler);

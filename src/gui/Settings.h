@@ -40,12 +40,21 @@ struct BitTorrentPrefs {
     bool operator==(const BitTorrentPrefs&) const = default;   // != synthesized (C++20)
 };
 
+// Task 17: mainline DHT toggle + UDP port, gating DownloadManager's real,
+// internet-bootstrapping DhtNode join (see DownloadManager::startDhtBootstrap()).
+struct DhtSettings {
+    bool    enabled = true;
+    quint16 port    = 6881;
+    bool operator==(const DhtSettings&) const = default;   // != synthesized (C++20)
+};
+
 struct AppSettings {
     EngineConfig     engine;
     UiPrefs          ui;
     SchedulerConfig  scheduler;
     BrowserPrefs     browser;
     BitTorrentPrefs  bittorrent;
+    DhtSettings      dht;
 };
 
 namespace SettingsIo {

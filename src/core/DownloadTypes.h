@@ -10,13 +10,15 @@
 
 using HeaderList = QList<QPair<QByteArray, QByteArray>>;
 
-// Checking appended at the END (not alphabetized/grouped with the other
-// states): DownloadRecord::state is persisted as a raw int (see
-// Persistence::writeSession/readSession), so inserting it anywhere else would
-// shift the numeric value of every state after it and corrupt any
-// downloads.json written by a previous build. Checking = 7.
+// Checking and FetchingMetadata are both appended at the END (not
+// alphabetized/grouped with the other states): DownloadRecord::state is
+// persisted as a raw int (see Persistence::writeSession/readSession), so
+// inserting either anywhere else would shift the numeric value of every
+// state after it and corrupt any downloads.json/torrents.json written by a
+// previous build. Checking = 7. FetchingMetadata = 8 (Task 15: a magnet
+// whose info dict hasn't been recovered yet via MetadataFetch).
 enum class DownloadState { Queued, Connecting, Downloading, Paused, Completed, Error, Cancelled,
-                            Checking };
+                            Checking, FetchingMetadata };
 enum class Priority { High, Normal, Low };
 enum class PieceStrategy { RarestFirst, Sequential };
 enum class ResumeVerifyMode { TrustBitfield, RecheckOnOpen };
@@ -36,6 +38,7 @@ inline const char* stateName(DownloadState s) {
         case DownloadState::Error:       return "Error";
         case DownloadState::Cancelled:   return "Cancelled";
         case DownloadState::Checking:    return "Checking";
+        case DownloadState::FetchingMetadata: return "Resolving magnet…";
     }
     return "Unknown";
 }

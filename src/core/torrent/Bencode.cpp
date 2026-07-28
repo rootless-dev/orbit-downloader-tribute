@@ -4,6 +4,12 @@ namespace {
 
 bool isDigit(char c) { return c >= '0' && c <= '9'; }
 
+// Hard cap on list/dict nesting depth. Far beyond any legitimate torrent,
+// KRPC, or ut_metadata structure — exists solely to stop a maliciously deep
+// bencode payload (e.g. "l" repeated hundreds of thousands of times) from
+// blowing the native stack via unbounded recursion.
+constexpr int kMaxNestingDepth = 200;
+
 // Recursive-descent decoder over the input buffer. Tracks a cursor position
 // and records, for every value parsed, its raw [begin, end) span so callers
 // can later slice the exact original bytes (needed for info-hash hashing).
@@ -11,7 +17,7 @@ class Decoder {
 public:
     explicit Decoder(const QByteArray& in) : m_in(in) {}
 
-    BencodeValue parseValue() {
+    BencodeValue parseValue(int depth = 0) {
         if (m_failed) return {};
         if (atEnd()) {
             fail("unexpected end of input");
@@ -19,8 +25,8 @@ public:
         }
         const char c = m_in[m_pos];
         if (c == 'i') return parseInt();
-        if (c == 'l') return parseList();
-        if (c == 'd') return parseDict();
+        if (c == 'l') return parseList(depth);
+        if (c == 'd') return parseDict(depth);
         if (isDigit(c)) return parseBytes();
         fail(QString("unexpected character '%1'").arg(QChar::fromLatin1(c)));
         return {};
@@ -95,9 +101,10 @@ private:
     }
 
     // l<values>e
-    BencodeValue parseList() {
+    BencodeValue parseList(int depth) {
         const int begin = m_pos;
         m_pos++; // skip 'l'
+        if (depth + 1 > kMaxNestingDepth) { fail("nesting depth exceeds limit"); return {}; }
         QList<BencodeValue> items;
         while (true) {
             if (atEnd()) { fail("truncated list"); return {}; }
@@ -105,7 +112,7 @@ private:
                 m_pos++;
                 break;
             }
-            BencodeValue item = parseValue();
+            BencodeValue item = parseValue(depth + 1);
             if (m_failed) return {};
             items.append(std::move(item));
         }
@@ -115,9 +122,10 @@ private:
     }
 
     // d<key><value>...e ; keys must be byte strings
-    BencodeValue parseDict() {
+    BencodeValue parseDict(int depth) {
         const int begin = m_pos;
         m_pos++; // skip 'd'
+        if (depth + 1 > kMaxNestingDepth) { fail("nesting depth exceeds limit"); return {}; }
         QMap<QByteArray, BencodeValue> dict;
         while (true) {
             if (atEnd()) { fail("truncated dict"); return {}; }
@@ -128,7 +136,7 @@ private:
             if (!isDigit(m_in[m_pos])) { fail("dict key must be a byte string"); return {}; }
             BencodeValue key = parseBytes();
             if (m_failed) return {};
-            BencodeValue value = parseValue();
+            BencodeValue value = parseValue(depth + 1);
             if (m_failed) return {};
             dict.insert(key.toBytes(), std::move(value));
         }

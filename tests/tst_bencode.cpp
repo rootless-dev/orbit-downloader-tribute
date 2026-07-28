@@ -36,6 +36,17 @@ private slots:
         const BencodeValue& info = v[QByteArray("info")];
         QCOMPARE(in.mid(info.rawBegin(), info.rawEnd()-info.rawBegin()), QByteArray("d1:ni1ee"));
     }
+    // Attacker-controlled bencode (e.g. a peer's ut_metadata payload) with
+    // deep nesting must fail cleanly rather than overflow the native stack
+    // via unbounded recursive descent. 300 nested "l"s is well past the
+    // 200-deep cap but small enough to keep the test fast.
+    void rejectsExcessiveNestingWithoutCrashing() {
+        QByteArray in(300, 'l');
+        in += QByteArray(300, 'e');
+        bool ok = true;
+        Bencode::decode(in, &ok);
+        QVERIFY(!ok); // must not crash; must report failure
+    }
 };
 QTEST_MAIN(TstBencode)
 #include "tst_bencode.moc"

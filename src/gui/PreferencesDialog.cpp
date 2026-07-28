@@ -53,8 +53,8 @@ static QWidget* makePlaceholderPage(const QString& title, QWidget* parent) {
     return makeSectionPage(title, body, parent);
 }
 
-PreferencesDialog::PreferencesDialog(const AppSettings& current, QWidget* parent)
-    : QDialog(parent), m_base(current) {
+PreferencesDialog::PreferencesDialog(const AppSettings& current, QWidget* parent, int dhtNodeCount)
+    : QDialog(parent), m_base(current), m_dhtNodeCountValue(dhtNodeCount) {
     setWindowTitle(tr("Preferences"));
 
     m_categoryList = new QListWidget(this);
@@ -221,11 +221,23 @@ PreferencesDialog::PreferencesDialog(const AppSettings& current, QWidget* parent
         m_btStrategy->addItem(tr("Rarest-first"), int(PieceStrategy::RarestFirst));
         m_btStrategy->addItem(tr("Sequential"),   int(PieceStrategy::Sequential));
         m_btListenPort = new QSpinBox; m_btListenPort->setRange(1, 65535);
+
+        m_dhtEnabled = new QCheckBox(tr("Enable DHT (mainline)"));
+        m_dhtPort = new QSpinBox; m_dhtPort->setRange(1, 65535);
+        m_dhtNodeCount = new QLabel;
+        QPalette dhtPal = m_dhtNodeCount->palette();
+        dhtPal.setColor(QPalette::WindowText, dhtPal.color(QPalette::PlaceholderText));
+        m_dhtNodeCount->setPalette(dhtPal);
+        connect(m_dhtEnabled, &QCheckBox::toggled, this, [this](bool) { updateDhtNodeCountLabel(); });
+
         auto* f = new QFormLayout;
         f->addRow(tr("Max peers per torrent:"), m_btMaxPeers);
         f->addRow(tr("Resume verification:"),   m_btVerify);
         f->addRow(tr("Default piece strategy:"), m_btStrategy);
         f->addRow(tr("Listen port:"),            m_btListenPort);
+        f->addRow(QString(),                     m_dhtEnabled);
+        f->addRow(tr("DHT UDP port:"),           m_dhtPort);
+        f->addRow(tr("DHT nodes:"),              m_dhtNodeCount);
         m_categoryList->addItem(tr("BitTorrent"));
         m_stack->addWidget(makeSectionPage(tr("BitTorrent"), f, this));
     }
@@ -304,6 +316,20 @@ void PreferencesDialog::loadFromSettings(const AppSettings& s) {
     m_btVerify->setCurrentIndex(m_btVerify->findData(int(s.bittorrent.verify)));
     m_btStrategy->setCurrentIndex(m_btStrategy->findData(int(s.bittorrent.defaultStrategy)));
     m_btListenPort->setValue(s.bittorrent.listenPort);
+    m_dhtEnabled->setChecked(s.dht.enabled);
+    m_dhtPort->setValue(s.dht.port);
+    updateDhtNodeCountLabel();
+}
+
+// Read-only diagnostics: "-" when DHT is off (nothing to count) or the count
+// is unknown (no snapshot was passed to the constructor); the raw node count
+// otherwise. Re-evaluated live on toggle so flipping the checkbox in the
+// still-open dialog doesn't leave a stale "N nodes" next to an unchecked box.
+void PreferencesDialog::updateDhtNodeCountLabel() {
+    if (!m_dhtEnabled->isChecked() || m_dhtNodeCountValue < 0)
+        m_dhtNodeCount->setText(tr("—"));   // em dash
+    else
+        m_dhtNodeCount->setText(tr("%1 nodes").arg(m_dhtNodeCountValue));
 }
 
 AppSettings PreferencesDialog::result() const {
@@ -335,6 +361,8 @@ AppSettings PreferencesDialog::result() const {
     s.bittorrent.verify             = ResumeVerifyMode(m_btVerify->currentData().toInt());
     s.bittorrent.defaultStrategy    = PieceStrategy(m_btStrategy->currentData().toInt());
     s.bittorrent.listenPort         = quint16(m_btListenPort->value());
+    s.dht.enabled = m_dhtEnabled->isChecked();
+    s.dht.port    = quint16(m_dhtPort->value());
     return s;
 }
 
@@ -375,3 +403,8 @@ void PreferencesDialog::setBtVerifyForTest(ResumeVerifyMode m) {
 void PreferencesDialog::setBtStrategyForTest(PieceStrategy s) {
     m_btStrategy->setCurrentIndex(m_btStrategy->findData(int(s)));
 }
+void PreferencesDialog::setDhtEnabledForTest(bool on) {
+    m_dhtEnabled->setChecked(on);   // toggled() -> updateDhtNodeCountLabel()
+}
+void PreferencesDialog::setDhtPortForTest(quint16 p) { m_dhtPort->setValue(p); }
+QString PreferencesDialog::dhtNodeCountTextForTest() const { return m_dhtNodeCount->text(); }

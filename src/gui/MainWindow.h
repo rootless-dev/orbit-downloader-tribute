@@ -72,12 +72,14 @@ protected:
 private slots:
     void onNew();
     void onOpenTorrent();
+    void onOpenMagnet();
     void onStart();
     void onPause();
     void onDelete();
     void onSelectionChanged();
     void onStateChanged(const QUuid& id, int state);
     void onClipboardUrl(const QUrl& url);
+    void onClipboardMagnet(const QString& uri);
     void onCredentialsRequired(const QUuid& id, const QString& host);
     void onPreferences();
     void onScheduler();
@@ -99,6 +101,9 @@ private:
     QString defaultDir() const;
     void    addUrlViaDialog(const QUrl& prefill);
     void    openTorrentFile(const QString& path);   // parse -> TorrentOpenDialog -> addTorrent
+    void    openMagnet(const QString& uri);          // validate -> addMagnet (warns on invalid)
+    QUuid   addMagnetTask(const QString& uri);        // shared addMagnet + appendTask (dedup-safe)
+    void    showMagnetNotification(const QString& uri);   // Notify-mode clickable status-bar link
     void    enqueue(const QUrl& url, const QString& dir);
     QUuid beginBackgroundLink(const QUrl& url, const HeaderList& headers);
     void  receiveLink(const QUrl& url, const HeaderList& headers);
