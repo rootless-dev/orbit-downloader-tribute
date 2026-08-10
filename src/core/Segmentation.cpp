@@ -25,3 +25,20 @@ QVector<Segment> computeSegments(qint64 totalBytes, bool supportsRange,
     }
     return segs;
 }
+
+SplitPlan planSplit(const QVector<Segment>& segments, qint64 minSplitBytes) {
+    const qint64 minHalf = std::max<qint64>(1, minSplitBytes);
+    SplitPlan best;
+    qint64 bestRemaining = 0;
+    for (const Segment& s : segments) {
+        if (s.end < 0 || s.isComplete()) continue;
+        const qint64 remaining = s.end - s.current + 1;
+        if (remaining < 2 * minHalf) continue;
+        if (remaining <= bestRemaining) continue;      // empate -> menor índice (o já visto)
+        bestRemaining = remaining;
+        best.ok      = true;
+        best.index   = s.index;
+        best.splitAt = s.current + remaining / 2;
+    }
+    return best;
+}

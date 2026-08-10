@@ -40,6 +40,14 @@ public:
                        const HeaderList& extraHeaders) = 0;
     virtual void stop() = 0;
     virtual Segment segment() const = 0;
+    // Encolhe o segmento EM VOO para [start, newEnd], cedendo a cauda a um
+    // segmento novo (divisão dinâmica, DownloadTask::fillConnections). A
+    // conexão atual continua e é cortada em newEnd — nada é reconectado.
+    // Retorna false quando o worker não pode ceder a cauda (parado/terminado,
+    // fallback sem end, newEnd fora de [current, end)); nesse caso o chamador
+    // NÃO pode criar o segmento doado, sob pena de baixar a mesma faixa duas
+    // vezes. Default false: um transporte que não implementa nunca é dividido.
+    virtual bool shrinkEnd(qint64 newEnd) { Q_UNUSED(newEnd); return false; }
 signals:
     void progressed(int index, qint64 currentOffset);
     void completed(int index);

@@ -240,6 +240,17 @@ void FtpSegmentWorker::finishSegment() {
     emit completed(m_seg.index);
 }
 
+// Divisão dinâmica: aqui basta mover o `end`, porque no FTP o corte já é
+// nosso de qualquer forma (o servidor manda do REST até o fim do arquivo —
+// vide onDataReadyRead). Recusa cortes que não deixem byte algum para este
+// worker ou que não encolham, mantendo os segmentos disjuntos.
+bool FtpSegmentWorker::shrinkEnd(qint64 newEnd) {
+    if (m_stopped || m_finished || m_seg.end < 0) return false;
+    if (newEnd >= m_seg.end || newEnd < m_seg.current) return false;
+    m_seg.end = newEnd;
+    return true;
+}
+
 void FtpSegmentWorker::onControlFailed(const QString& error, FtpErrorClass cls) {
     if (m_stopped || m_finished) return;
     switch (cls) {

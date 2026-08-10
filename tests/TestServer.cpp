@@ -56,6 +56,22 @@ bool TestServer::listen() {
         return full;
     });
 
+    // Honra o início do Range mas IGNORA o fim, mandando até o fim do arquivo.
+    // É exatamente a resposta que fica em voo depois de um shrinkEnd (divisão
+    // dinâmica): quem corta no `end` do segmento é o worker.
+    m_http.route("/overrange", [this](const QHttpServerRequest& req) {
+        qint64 s, e;
+        if (!parseRange(req.value("Range"), s, e)) s = 0;
+        const QByteArray b = partial(s, m_body.size() - 1);
+        Resp r("application/octet-stream", b, Resp::StatusCode::PartialContent);
+        QHttpHeaders headers;
+        headers.append(QHttpHeaders::WellKnownHeader::ContentRange,
+            QString("bytes %1-%2/%3").arg(s).arg(m_body.size() - 1).arg(m_body.size()).toUtf8());
+        headers.append(QHttpHeaders::WellKnownHeader::AcceptRanges, "bytes");
+        r.setHeaders(std::move(headers));
+        return r;
+    });
+
     m_http.route("/plain", [this](const QHttpServerRequest&) {
         return Resp("application/octet-stream", m_body);   // ignores Range, always 200
     });

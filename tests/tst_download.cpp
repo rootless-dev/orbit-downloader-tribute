@@ -27,6 +27,7 @@
 #include "DownloadManager.h"
 #include "Persistence.h"
 #include "Logger.h"
+#include <algorithm>
 
 static QByteArray makeBody(int n) {
     QByteArray b; b.resize(n);
@@ -181,6 +182,58 @@ private slots:
         file.seek(1000);
         QCOMPARE(file.read(1000), m_body.mid(1000, 1000));
         QCOMPARE(w.segment().current, 2000LL);      // advanced past end
+    }
+
+    // O corte: servidor que ignora o fim do Range (é o que a resposta em voo
+    // vira depois de um shrinkEnd). O worker precisa parar no `end` do
+    // segmento — o excedente pertence ao segmento doado e não pode ser escrito
+    // por cima dele.
+    void segmentStopsAtEndWhenServerOverruns() {
+        TestServer srv(m_body);
+        QVERIFY(srv.listen());
+        QTemporaryFile tmp; QVERIFY(tmp.open());
+        QFile file(tmp.fileName());
+        QVERIFY(file.open(QIODevice::ReadWrite));
+        file.resize(m_body.size());
+
+        QNetworkAccessManager nam;
+        EngineConfig cfg;
+        SegmentWorker w(&nam, &file, cfg);
+        QSignalSpy done(&w, &SegmentWorker::completed);
+        Segment seg{0, 1000, 1000, 1999};
+        w.start(seg, srv.url("/overrange"), QString(), Credentials{}, HeaderList{});
+        QVERIFY(done.wait(3000));
+
+        QCOMPARE(w.segment().current, 2000LL);      // parou no end, não no EOF
+        file.seek(1000);
+        QCOMPARE(file.read(1000), m_body.mid(1000, 1000));
+        file.seek(2000);
+        QCOMPARE(file.read(100), QByteArray(100, '\0'));   // nada escrito além do end
+    }
+
+    // Divisão dinâmica ponta a ponta, com o worker HTTP de verdade: nenhum
+    // byte duplicado/perdido nas faixas doadas e o arquivo sai idêntico.
+    void dynamicSplitKeepsFileByteIdentical() {
+        const QByteArray big = makeBody(400000);
+        TestServer srv(big);
+        QVERIFY(srv.listen());
+        QTemporaryDir dir;
+        const QString dest = dir.filePath("out.bin");
+        QNetworkAccessManager nam;
+        EngineConfig cfg; cfg.segmentCount = 4; cfg.minSegSize = 4096;
+        HttpTransport tr(&nam);
+        DownloadTask task(&tr, cfg);
+        task.init(QUuid::createUuid(), srv.url("/ranged"), dest, 4);
+        task.start();
+        QTRY_COMPARE_WITH_TIMEOUT(task.state(), DownloadState::Completed, 15000);
+        QFile f(dest); QVERIFY(f.open(QIODevice::ReadOnly));
+        QCOMPARE(f.readAll(), big);
+        auto segs = task.segments();
+        std::sort(segs.begin(), segs.end(),
+                  [](const Segment& a, const Segment& b){ return a.start < b.start; });
+        QCOMPARE(segs.first().start, 0LL);
+        QCOMPARE(segs.last().end, qint64(big.size()) - 1);
+        for (int i = 1; i < segs.size(); ++i) QCOMPARE(segs[i].start, segs[i-1].end + 1);
     }
 
     void downloadsMultiSegmentByteIdentical() {

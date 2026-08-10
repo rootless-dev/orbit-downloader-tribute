@@ -4,6 +4,7 @@
 #include "Persistence.h"
 #include "Transport.h"
 #include <QObject>
+#include <QHash>
 #include <QTimer>
 #include <QVector>
 class QFile;
@@ -50,6 +51,9 @@ private:
     void onProbed(const ProbeResult& r);
     void beginSegments();
     void spawnWorker(const Segment& seg);
+    void fillConnections();
+    void stopAllWorkers(bool destroy);
+    int  completedSegments() const;
     void onSegmentCompleted(int index);
     void onSegmentFailed(int index, const QString& error, FailureKind kind);
     void onRestartRequired(int index);
@@ -74,9 +78,12 @@ private:
     QString                m_error;
     DownloadState          m_state = DownloadState::Queued;
     QVector<Segment>       m_segments;
-    QVector<SegmentSource*> m_workers;
+    // Workers VIVOS, por índice de segmento. Um segmento incompleto sem
+    // entrada aqui está à espera de conexão; o tamanho deste mapa é o número
+    // de conexões abertas, mantido em m_segmentCount por fillConnections().
+    QHash<int, SegmentSource*> m_workers;
+    int                    m_nextSegIndex = 0;   // próximo índice p/ segmento doado
     QFile*                 m_file = nullptr;
-    int                    m_completedCount = 0;
     QTimer*                m_metaTimer = nullptr;
     QTimer*                m_progressTimer = nullptr;
     bool                   m_progressPending = false;
