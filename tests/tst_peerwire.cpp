@@ -73,7 +73,14 @@ private slots:
         QTcpSocket* peerSock = server.nextPendingConnection();
         QVERIFY(peerSock);
 
-        while (peerSock->bytesAvailable() < 68) QVERIFY(peerSock->waitForReadyRead(2000));
+        // QTRY_VERIFY, nunca waitForReadyRead: o handshake sai do slot
+        // onConnected() do NOSSO lado, e waitForReadyRead() bombeia apenas o
+        // socket em que foi chamado - o do peer simulado. Se o newConnection
+        // do servidor for entregue antes do connected do cliente (ordem dos
+        // notifiers, que varia por máquina), o cliente nunca escreve e a
+        // espera estoura. QTRY_VERIFY roda o event loop, então os dois lados
+        // progridem.
+        QTRY_VERIFY(peerSock->bytesAvailable() >= 68);
         const QByteArray ourHandshake = peerSock->read(68);
         QCOMPARE(ourHandshake.size(), 68);
         QCOMPARE(ourHandshake.mid(28, 20), infoHash);
@@ -124,7 +131,14 @@ private slots:
         QVERIFY(newConnSpy.count() > 0 || newConnSpy.wait(2000));
         QTcpSocket* peerSock = server.nextPendingConnection();
         QVERIFY(peerSock);
-        while (peerSock->bytesAvailable() < 68) QVERIFY(peerSock->waitForReadyRead(2000));
+        // QTRY_VERIFY, nunca waitForReadyRead: o handshake sai do slot
+        // onConnected() do NOSSO lado, e waitForReadyRead() bombeia apenas o
+        // socket em que foi chamado - o do peer simulado. Se o newConnection
+        // do servidor for entregue antes do connected do cliente (ordem dos
+        // notifiers, que varia por máquina), o cliente nunca escreve e a
+        // espera estoura. QTRY_VERIFY roda o event loop, então os dois lados
+        // progridem.
+        QTRY_VERIFY(peerSock->bytesAvailable() >= 68);
         peerSock->read(68);
 
         QByteArray reply = PeerWire::handshake(infoHash, QByteArray(20, '\x03'));
@@ -153,7 +167,14 @@ private slots:
         QVERIFY(newConnSpy.count() > 0 || newConnSpy.wait(2000));
         QTcpSocket* peerSock = server.nextPendingConnection();
         QVERIFY(peerSock);
-        while (peerSock->bytesAvailable() < 68) QVERIFY(peerSock->waitForReadyRead(2000));
+        // QTRY_VERIFY, nunca waitForReadyRead: o handshake sai do slot
+        // onConnected() do NOSSO lado, e waitForReadyRead() bombeia apenas o
+        // socket em que foi chamado - o do peer simulado. Se o newConnection
+        // do servidor for entregue antes do connected do cliente (ordem dos
+        // notifiers, que varia por máquina), o cliente nunca escreve e a
+        // espera estoura. QTRY_VERIFY roda o event loop, então os dois lados
+        // progridem.
+        QTRY_VERIFY(peerSock->bytesAvailable() >= 68);
         peerSock->read(68);
 
         QByteArray reply = PeerWire::handshake(infoHash, QByteArray(20, '\x03'));
@@ -180,7 +201,14 @@ private slots:
         conn.connectToPeer();
         QVERIFY(newConn.count() > 0 || newConn.wait(2000));
         QTcpSocket* s = server.nextPendingConnection(); QVERIFY(s);
-        while (s->bytesAvailable() < 68) QVERIFY(s->waitForReadyRead(2000));
+        // QTRY_VERIFY, nunca waitForReadyRead: o handshake sai do slot
+        // onConnected() do NOSSO lado, e waitForReadyRead() bombeia apenas o
+        // socket em que foi chamado - o do peer simulado. Se o newConnection
+        // do servidor for entregue antes do connected do cliente (ordem dos
+        // notifiers, que varia por máquina), o cliente nunca escreve e a
+        // espera estoura. QTRY_VERIFY roda o event loop, então os dois lados
+        // progridem.
+        QTRY_VERIFY(s->bytesAvailable() >= 68);
         s->read(68);
         // reply: our handshake (ext bit set) + extended handshake advertising ut_metadata=3, metadata_size=1234
         QByteArray reply = PeerWire::handshake(ih, QByteArray(20,'\x03'));
