@@ -119,6 +119,75 @@ private slots:
         QCOMPARE(s.ui.startAtLogin, false);
         QCOMPARE(s.ui.closeToTrayHintShown, false);
     }
+    void bittorrentPrefsRoundTrip() {
+        AppSettings s;
+        s.bittorrent.maxPeersPerTorrent = 80;
+        s.bittorrent.verify             = ResumeVerifyMode::RecheckOnOpen;
+        s.bittorrent.defaultStrategy    = PieceStrategy::Sequential;
+        s.bittorrent.listenPort         = 51413;
+        const QJsonObject j = SettingsIo::toJson(s, QJsonObject{});
+        const AppSettings back = SettingsIo::fromJson(j, EngineConfig{});
+        QCOMPARE(back.bittorrent.maxPeersPerTorrent, 80);
+        QCOMPARE(int(back.bittorrent.verify), int(ResumeVerifyMode::RecheckOnOpen));
+        QCOMPARE(int(back.bittorrent.defaultStrategy), int(PieceStrategy::Sequential));
+        QCOMPARE(back.bittorrent.listenPort, quint16(51413));
+    }
+    void bittorrentPrefsDefaultsWhenAbsent() {
+        const AppSettings back = SettingsIo::fromJson(QJsonObject{}, EngineConfig{});
+        QCOMPARE(back.bittorrent.maxPeersPerTorrent, 50);
+        QVERIFY(back.bittorrent.verify == ResumeVerifyMode::TrustBitfield);
+        QVERIFY(back.bittorrent.defaultStrategy == PieceStrategy::RarestFirst);
+        QCOMPARE(back.bittorrent.listenPort, quint16(6881));
+    }
+    void bittorrentBlockRoundTripsPreservingUnknownTopLevelKeys() {
+        QJsonObject root;
+        root["bittorrent"] = QJsonObject{
+            {"maxPeersPerTorrent", 120},
+            {"verify",             "recheck"},
+            {"strategy",           "sequential"},
+            {"listenPort",         6882}};
+        root["mystery"] = "keep-me";   // unknown top-level key
+        const AppSettings s = SettingsIo::fromJson(root, EngineConfig{});
+        QCOMPARE(s.bittorrent.maxPeersPerTorrent, 120);
+        QVERIFY(s.bittorrent.verify == ResumeVerifyMode::RecheckOnOpen);
+        QVERIFY(s.bittorrent.defaultStrategy == PieceStrategy::Sequential);
+        QCOMPARE(s.bittorrent.listenPort, quint16(6882));
+        const QJsonObject out = SettingsIo::toJson(s, root);
+        QCOMPARE(out.value("bittorrent").toObject().value("maxPeersPerTorrent").toInt(), 120);
+        QCOMPARE(out.value("mystery").toString(), QString("keep-me"));   // preserved
+    }
+    void dhtBlockRoundTripsWithDefaults() {
+        QJsonObject root; // no dht block
+        const AppSettings s = SettingsIo::fromJson(root, EngineConfig{});
+        QCOMPARE(s.dht.enabled, true);     // default on
+        QCOMPARE(s.dht.port, quint16(6881));
+
+        AppSettings edited = s;
+        edited.dht.enabled = false;
+        edited.dht.port    = 6969;
+        const AppSettings back = SettingsIo::fromJson(SettingsIo::toJson(edited, QJsonObject{}), EngineConfig{});
+        QCOMPARE(back.dht.enabled, false);
+        QCOMPARE(back.dht.port, quint16(6969));
+    }
+    void dhtBlockDefaultsWhenAbsentFromFile() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("settings.json");
+        Persistence::writeJsonObject(path, QJsonObject{{"engine", QJsonObject{}}});  // no dht block at all
+        const AppSettings s = SettingsIo::load(path, EngineConfig{});
+        QCOMPARE(s.dht.enabled, true);
+        QCOMPARE(s.dht.port, quint16(6881));
+    }
+    void dhtBlockRoundTripsPreservingUnknownTopLevelKeys() {
+        QJsonObject root;
+        root["dht"] = QJsonObject{{"enabled", false}, {"port", 6969}};
+        root["mystery"] = "keep-me";   // unknown top-level key
+        const AppSettings s = SettingsIo::fromJson(root, EngineConfig{});
+        QCOMPARE(s.dht.enabled, false);
+        QCOMPARE(s.dht.port, quint16(6969));
+        const QJsonObject out = SettingsIo::toJson(s, root);
+        QCOMPARE(out.value("dht").toObject().value("port").toInt(), 6969);
+        QCOMPARE(out.value("mystery").toString(), QString("keep-me"));   // preserved
+    }
 };
 
 QTEST_MAIN(TstSettings)

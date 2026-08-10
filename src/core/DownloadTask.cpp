@@ -4,10 +4,23 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <utility>
 
 DownloadTask::DownloadTask(Transport* transport, const EngineConfig& cfg,
                            RateLimiter* limiter, QObject* parent)
-    : QObject(parent), m_transport(transport), m_cfg(cfg), m_limiter(limiter) {}
+    : AbstractTask(parent), m_transport(transport), m_cfg(cfg), m_limiter(limiter) {}
+
+// AbstractTask::kind(): HTTP vs FTP is derived from the task's own URL scheme
+// (there's no separate transport-kind accessor) - "ftp" -> Ftp, anything else
+// (http/https today) -> Http.
+AbstractTask::Kind DownloadTask::kind() const {
+    return m_url.scheme().compare(QLatin1String("ftp"), Qt::CaseInsensitive) == 0
+               ? Kind::Ftp : Kind::Http;
+}
+
+QString DownloadTask::displayName() const {
+    return QFileInfo(m_destPath).fileName();
+}
 
 void DownloadTask::init(const QUuid& id, const QUrl& url, const QString& destPath, int segmentCount,
                         const HeaderList& extraHeaders, bool provisionalName) {
@@ -23,6 +36,10 @@ void DownloadTask::restore(const DownloadRecord& rec, const QVector<Segment>& se
     m_supportsRange = rec.supportsRange; m_segments = segs;
     m_etag = etag; m_lastModified = lastModified; m_validated = validated;
     m_extraHeaders = rec.extraHeaders;
+    // O .meta pode trazer MAIS segmentos que segmentCount (divisões dinâmicas
+    // da sessão anterior). Os índices doados continuam de onde pararam para
+    // não colidir com os que já estão no vetor restaurado.
+    for (const auto& s : m_segments) m_nextSegIndex = qMax(m_nextSegIndex, s.index + 1);
     m_probed = !segs.isEmpty();
     m_priority = rec.priority;
     m_state = (rec.state == DownloadState::Cancelled) ? DownloadState::Cancelled
@@ -69,6 +86,7 @@ void DownloadTask::onProbed(const ProbeResult& r) {
     m_lastModified  = r.lastModified;
     m_validated     = !r.etag.isEmpty() || !r.lastModified.isEmpty();
     m_segments      = computeSegments(m_totalBytes, m_supportsRange, m_segmentCount, m_cfg.minSegSize);
+    m_nextSegIndex  = m_segments.size();
     logLine(LogLevel::Info, QStringLiteral("probe ok: status=%1 type=%2 total=%3 range=%4 segments=%5")
                 .arg(r.httpStatus).arg(r.contentType.isEmpty() ? QStringLiteral("?") : r.contentType)
                 .arg(m_totalBytes).arg(m_supportsRange ? "yes" : "no").arg(m_segments.size()));
@@ -149,17 +167,59 @@ void DownloadTask::beginSegments() {
         });
     }
     m_metaTimer->start();
-    m_completedCount = 0;
-    for (const auto& seg : m_segments) {
-        if (seg.isComplete()) { ++m_completedCount; continue; }
-        spawnWorker(seg);
-    }
+    // Não spawna um worker por segmento: fillConnections() abre exatamente
+    // m_segmentCount conexões, dividindo o que for preciso. Isso cobre tanto o
+    // início (N segmentos, N workers) quanto a retomada de um .meta com mais
+    // segmentos que conexões (só os N primeiros incompletos saem agora; os
+    // demais entram conforme os workers vão ficando livres).
+    fillConnections();
     checkAllComplete();     // in case everything was already complete (restore)
+}
+
+// Mantém m_segmentCount conexões abertas até o download acabar. Duas fontes de
+// trabalho, nesta ordem:
+//   1. segmento incompleto ainda sem worker (retomada, ou metade doada que
+//      sobrou de uma divisão anterior);
+//   2. divisão do segmento com maior resto (planSplit) - é isto que impede a
+//      "cauda": sem ela, o último segmento terminaria sozinho com N-1
+//      conexões ociosas.
+// O corte só vale depois que o worker aceita shrinkEnd(): recusado, o segmento
+// doado NÃO é criado (senão a mesma faixa seria baixada duas vezes).
+void DownloadTask::fillConnections() {
+    if (m_state != DownloadState::Downloading) return;
+    const int target = qMax(1, m_segmentCount);
+    while (m_workers.size() < target) {
+        int pending = -1;
+        for (const auto& s : m_segments)
+            if (!s.isComplete() && !m_workers.contains(s.index)) { pending = s.index; break; }
+        if (pending >= 0) {
+            for (const auto& s : m_segments) if (s.index == pending) { spawnWorker(s); break; }
+            continue;
+        }
+        // O worker é a fonte da verdade do offset (o `progressed` que alimenta
+        // m_segments pode não ter chegado ainda nesta volta do event loop).
+        for (auto& s : m_segments)
+            if (auto* w = m_workers.value(s.index)) s.current = w->segment().current;
+        const SplitPlan plan = planSplit(m_segments, m_cfg.minSegSize);
+        if (!plan.ok) break;                       // resto pequeno demais: deixa terminar
+        SegmentSource* w = m_workers.value(plan.index);
+        if (!w || !w->shrinkEnd(plan.splitAt - 1)) break;
+        Segment donated;
+        donated.index   = m_nextSegIndex++;
+        donated.start   = plan.splitAt;
+        donated.current = plan.splitAt;
+        for (auto& s : m_segments)
+            if (s.index == plan.index) { donated.end = s.end; s.end = plan.splitAt - 1; break; }
+        m_segments.append(donated);
+        logLine(LogLevel::Debug, QStringLiteral("split segment %1 -> new segment %2 [%3..%4]")
+                    .arg(plan.index).arg(donated.index).arg(donated.start).arg(donated.end));
+        spawnWorker(donated);
+    }
 }
 
 void DownloadTask::spawnWorker(const Segment& seg) {
     SegmentSource* w = m_transport->createWorker(m_file, m_cfg, m_limiter, this);
-    m_workers.append(w);
+    m_workers.insert(seg.index, w);
     connect(w, &SegmentSource::progressed, this, [this](int idx, qint64 cur) {
         for (auto& s : m_segments) if (s.index == idx) s.current = cur;
         emit segmentProgress(idx, cur);
@@ -186,10 +246,40 @@ void DownloadTask::spawnWorker(const Segment& seg) {
 }
 
 void DownloadTask::onSegmentCompleted(int index) {
-    for (auto& s : m_segments) if (s.index == index) s.current = s.end + 1;
-    ++m_completedCount;
+    // O worker é quem sabe onde o segmento realmente terminou: no fallback
+    // (end < 0 aqui) ele descobre o fim pelo EOF e só o seu m_seg tem o valor.
+    // Copiar de volta antes de marcar completo evita zerar o progresso desse
+    // caso (s.current = -1 + 1) e mantém receivedBytes() coerente.
+    SegmentSource* w = m_workers.take(index);
+    const qint64 realEnd = w ? w->segment().end : -1;
+    for (auto& s : m_segments)
+        if (s.index == index) {
+            if (s.end < 0 && realEnd >= 0) s.end = realEnd;
+            s.current = s.end + 1;
+        }
+    if (w) { w->stop(); w->deleteLater(); }   // nunca delete: o emissor ainda vai retornar
     logLine(LogLevel::Debug, QStringLiteral("segment %1 complete").arg(index));
+    fillConnections();      // a conexão que vagou volta ao trabalho imediatamente
     checkAllComplete();
+}
+
+// Para os workers vivos. destroy=true também os descarta (deleteLater, nunca
+// delete: quem chama costuma estar dentro de um emit do próprio worker) e
+// esvazia o mapa - o estado de cada segmento já está em m_segments/.meta, e
+// deixar objetos parados pendurados no mapa faria fillConnections() contá-los
+// como conexões abertas.
+void DownloadTask::stopAllWorkers(bool destroy) {
+    for (auto* w : std::as_const(m_workers)) {
+        w->stop();
+        if (destroy) w->deleteLater();
+    }
+    if (destroy) m_workers.clear();
+}
+
+int DownloadTask::completedSegments() const {
+    int n = 0;
+    for (const auto& s : m_segments) if (s.isComplete()) ++n;
+    return n;
 }
 
 void DownloadTask::onSegmentFailed(int index, const QString& error, FailureKind kind) {
@@ -200,7 +290,7 @@ void DownloadTask::onSegmentFailed(int index, const QString& error, FailureKind 
     if (m_metaTimer) m_metaTimer->stop();
     if (m_progressPending) emitProgressNow();   // flush the last coalesced value
     if (m_progressTimer) m_progressTimer->stop();
-    for (auto* w : m_workers) w->stop();
+    stopAllWorkers(true);
     Persistence::writeMeta(m_destPath, m_segments, m_etag, m_lastModified, m_validated);
     m_error = error;
     logLine(LogLevel::Warn, QStringLiteral("segment %1 failed: %2").arg(index).arg(error));
@@ -221,9 +311,13 @@ void DownloadTask::onRestartRequired(int index) {
     // os workers e seu frame de pilha ainda vai retornar. Destruí-lo aqui é
     // use-after-free (spec §9.1). stop() já o torna inerte imediatamente; a
     // destruição fica para o retorno ao event loop.
-    for (auto* w : m_workers) { w->stop(); w->deleteLater(); }
-    m_workers.clear();
+    stopAllWorkers(true);
 
+    // A segmentação vigente pode carregar divisões dinâmicas da rodada que
+    // acabou de ser invalidada; recomeçar do zero quer dizer recomeçar da
+    // segmentação inicial também.
+    m_segments = computeSegments(m_totalBytes, m_supportsRange, m_segmentCount, m_cfg.minSegSize);
+    m_nextSegIndex = m_segments.size();
     for (auto& s : m_segments) s.current = s.start;   // reset to zero
     m_validated = false;                               // don't send If-Range again
     m_etag.clear(); m_lastModified.clear();
@@ -237,7 +331,10 @@ void DownloadTask::emitProgressNow() {
 }
 
 void DownloadTask::checkAllComplete() {
-    if (m_completedCount < m_segments.size()) return;
+    // Contado a partir dos próprios segmentos, não de um acumulador: com a
+    // divisão dinâmica m_segments cresce durante o download, e um contador
+    // separado daria "completo" cedo demais (ou nunca).
+    if (m_segments.isEmpty() || completedSegments() < m_segments.size()) return;
     // NOTE (brief deviation): the brief says to stop m_metaTimer "at the top"
     // of checkAllComplete(). checkAllComplete() runs after *every* segment
     // completion, not just the final one, so stopping the timer before the
@@ -283,8 +380,7 @@ void DownloadTask::requeue() {
 // e zera todo o estado de probe/segmentos para que um Start futuro (a partir
 // de Cancelled) recomece do zero, não retome de onde parou.
 void DownloadTask::cancel() {
-    for (auto* w : m_workers) { w->stop(); w->deleteLater(); }
-    m_workers.clear();
+    stopAllWorkers(true);
     if (m_metaTimer) m_metaTimer->stop();
     if (m_progressTimer) m_progressTimer->stop();
     m_progressPending = false;
@@ -292,7 +388,7 @@ void DownloadTask::cancel() {
     QFile::remove(m_destPath);                 // parcial = próprio destPath
     Persistence::removeMeta(m_destPath);
     m_segments.clear();                        // -> Start recomeça do zero
-    m_completedCount = 0;
+    m_nextSegIndex = 0;
     m_probed = false;
     m_totalBytes = -1;
     setState(DownloadState::Cancelled);
@@ -308,7 +404,7 @@ void DownloadTask::clearProvisionalName() {
 }
 
 void DownloadTask::pause() {
-    for (auto* w : m_workers) w->stop();
+    stopAllWorkers(true);
     if (m_metaTimer) m_metaTimer->stop();
     if (m_progressPending) emitProgressNow();   // flush the last coalesced value
     if (m_progressTimer) m_progressTimer->stop();

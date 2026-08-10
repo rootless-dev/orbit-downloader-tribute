@@ -72,9 +72,21 @@ void SegmentWorker::onReadyRead() {
     }
     const qint64 avail = m_reply->bytesAvailable();
     if (avail <= 0) return;
-    qint64 grant = avail;
+    // O CORTE. Normalmente o servidor honra o Range e para sozinho no `end`,
+    // mas depois de um shrinkEnd() (divisão dinâmica) a resposta em voo ainda
+    // é a do range ANTIGO: o excedente pertence agora ao segmento doado e
+    // precisa ser descartado aqui. Clampar ANTES do take() pelo mesmo motivo
+    // do FTP (FtpSegmentWorker.cpp:144): o limiter é global e pedir tokens
+    // para bytes que nunca serão escritos rouba banda dos outros workers.
+    qint64 want = avail;
+    if (m_seg.end >= 0) {
+        const qint64 room = m_seg.end - m_seg.current + 1;
+        if (room <= 0) { finishNow(); return; }
+        want = qMin(want, room);
+    }
+    qint64 grant = want;
     if (m_limiter) {
-        grant = m_limiter->take(avail, QDateTime::currentMSecsSinceEpoch());
+        grant = m_limiter->take(want, QDateTime::currentMSecsSinceEpoch());
         if (grant <= 0) { scheduleDrain(); return; }   // sem tokens: tentar de novo em breve
     }
     const QByteArray chunk = m_reply->read(grant);
@@ -88,7 +100,43 @@ void SegmentWorker::onReadyRead() {
     }
     m_seg.current += written;
     emit progressed(m_seg.index, m_seg.current);
+    if (m_seg.end >= 0 && m_seg.current > m_seg.end) { finishNow(); return; }
     if (m_reply->bytesAvailable() > 0) scheduleDrain();  // restou dado sob throttle
+}
+
+// Fecha o segmento no ponto em que ele está completo, sem esperar o
+// finished() do reply. Necessário porque um segmento encolhido termina ANTES
+// do fim da resposta em voo (o resto do corpo pertence ao segmento doado);
+// no caso comum a resposta acaba exatamente aqui e o abort() só antecipa o
+// que o servidor já ia fazer. disconnect(this) antes do abort() pela mesma
+// disciplina de onTimeout(): sinais tardios de um reply reciclado não podem
+// reentrar em onFinished()/onErrorOccurred().
+void SegmentWorker::finishNow() {
+    if (m_stopped) return;
+    if (m_idleTimer)  m_idleTimer->stop();
+    if (m_drainTimer) m_drainTimer->stop();
+    if (m_retryTimer) m_retryTimer->stop();
+    if (m_reply) {
+        QNetworkReply* reply = m_reply;
+        m_reply = nullptr;
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
+    }
+    m_file->flush();
+    if (m_seg.end < 0) m_seg.end = m_seg.current - 1;   // fallback: end vira o EOF
+    emit completed(m_seg.index);
+}
+
+// Só aceita cortes que deixem pelo menos um byte para este worker
+// (newEnd >= current) e que de fato encolham (newEnd < end). Recusar mantém a
+// invariante de que os segmentos nunca se sobrepõem: o chamador só cria o
+// segmento doado quando recebe true.
+bool SegmentWorker::shrinkEnd(qint64 newEnd) {
+    if (m_stopped || m_seg.end < 0) return false;
+    if (newEnd >= m_seg.end || newEnd < m_seg.current) return false;
+    m_seg.end = newEnd;
+    return true;
 }
 
 void SegmentWorker::scheduleDrain() {
@@ -135,10 +183,14 @@ void SegmentWorker::onFinished() {
     // retry (burning the retry budget) while data that arrived on time sits
     // unread.
     if (reply->bytesAvailable() > 0) {
-        const QByteArray rest = reply->readAll();
-        m_file->seek(m_seg.current);
-        const qint64 w = m_file->write(rest);
-        if (w > 0) { m_seg.current += w; emit progressed(m_seg.index, m_seg.current); }
+        qint64 avail = reply->bytesAvailable();
+        if (m_seg.end >= 0) avail = qMin(avail, m_seg.end - m_seg.current + 1);   // corte (vide onReadyRead)
+        const QByteArray rest = avail > 0 ? reply->read(avail) : QByteArray();
+        if (!rest.isEmpty()) {
+            m_file->seek(m_seg.current);
+            const qint64 w = m_file->write(rest);
+            if (w > 0) { m_seg.current += w; emit progressed(m_seg.index, m_seg.current); }
+        }
     }
 
     // No transport error, but fewer bytes arrived than the segment still

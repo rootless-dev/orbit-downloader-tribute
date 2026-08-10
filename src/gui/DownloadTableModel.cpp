@@ -1,13 +1,14 @@
 #include "DownloadTableModel.h"
 #include "DownloadManager.h"
-#include "DownloadTask.h"
+#include "AbstractTask.h"
 #include "FileType.h"
+#include <QColor>
 #include <QFileInfo>
 #include <QLocale>
 
 DownloadTableModel::DownloadTableModel(DownloadManager* mgr, QObject* parent)
     : QAbstractTableModel(parent), m_mgr(mgr) {
-    for (DownloadTask* t : m_mgr->tasks()) appendTask(t);
+    for (AbstractTask* t : m_mgr->tasks()) appendTask(t);
     connect(m_mgr, &DownloadManager::taskProgress,     this, &DownloadTableModel::onTaskProgress);
     connect(m_mgr, &DownloadManager::taskStateChanged, this, &DownloadTableModel::onTaskStateChanged);
     m_clock.start();
@@ -17,19 +18,17 @@ DownloadTableModel::DownloadTableModel(DownloadManager* mgr, QObject* parent)
 
 int DownloadTableModel::rowCount(const QModelIndex&) const  { return m_rows.size(); }
 int DownloadTableModel::columnCount(const QModelIndex&) const { return ColumnCount; }
-DownloadTask* DownloadTableModel::taskAt(int row) const {
+AbstractTask* DownloadTableModel::taskAt(int row) const {
     if (row < 0 || row >= m_rows.size()) return nullptr;
     return m_rows[row].task;
 }
 int DownloadTableModel::rowForId(const QUuid& id) const { return m_index.value(id, -1); }
 
-void DownloadTableModel::appendTask(DownloadTask* t) {
+void DownloadTableModel::appendTask(AbstractTask* t) {
     const int row = m_rows.size();
     beginInsertRows({}, row, row);
-    Row r; r.task = t; r.total = t->record().totalBytes;
-    qint64 rx = 0;
-    for (const Segment& s : t->segments()) rx += s.downloaded();
-    r.received = rx;
+    Row r; r.task = t; r.total = t->totalBytes();
+    r.received = t->receivedBytes();
     m_rows.push_back(r);
     m_index.insert(t->id(), row);
     endInsertRows();
@@ -69,10 +68,24 @@ void DownloadTableModel::onSpeedTick() {
     const qint64 now = m_clock.elapsed();
     for (int row = 0; row < m_rows.size(); ++row) {
         Row& r = m_rows[row];
-        if (r.task->state() != DownloadState::Downloading) continue;
+        // Fix C1 defense-in-depth: r.task is a QPointer now, so a task freed
+        // without a matching retargetTask()/removeTaskById() call reads null
+        // here instead of dereferencing freed memory.
+        if (!r.task || r.task->state() != DownloadState::Downloading) continue;
         r.sampler.addSample(r.received, now);
         emit dataChanged(index(row, Speed), index(row, TimeLeft), {Qt::DisplayRole});
     }
+}
+
+void DownloadTableModel::retargetTask(const QUuid& id, AbstractTask* task) {
+    const int row = rowForId(id);
+    if (row < 0 || !task) return;
+    Row& r = m_rows[row];
+    r.task = task;
+    r.sampler.reset();                 // new task, fresh speed/ETA history
+    r.received = task->receivedBytes();
+    r.total    = task->totalBytes();
+    emit dataChanged(index(row, 0), index(row, ColumnCount - 1));
 }
 
 static QString stateText(DownloadState s) {
@@ -84,6 +97,8 @@ static QString stateText(DownloadState s) {
         case DownloadState::Completed:   return "Completed";
         case DownloadState::Error:       return "Error";
         case DownloadState::Cancelled:   return "Cancelled";
+        case DownloadState::Checking:    return "Checking";
+        case DownloadState::FetchingMetadata: return "Resolving magnet…";
     }
     return {};
 }
@@ -91,14 +106,25 @@ static QString stateText(DownloadState s) {
 QVariant DownloadTableModel::data(const QModelIndex& ix, int role) const {
     if (!ix.isValid() || ix.row() >= m_rows.size()) return {};
     const Row& r = m_rows[ix.row()];
-    const auto rec = r.task->record();
-    const QString name = QFileInfo(rec.destPath).fileName();
+    // Fix C1 defense-in-depth: r.task is a QPointer<AbstractTask> now, so a
+    // missed retargetTask()/removeTaskById() (a task freed without either)
+    // degrades to an empty row here instead of a use-after-free dereference.
+    if (!r.task) return {};
+    const QString name = r.task->displayName();
 
-    if (role == TaskRole)     return QVariant::fromValue(r.task);
+    if (role == TaskRole)     return QVariant::fromValue(static_cast<AbstractTask*>(r.task));
     if (role == StateRole)    return int(r.task->state());
     if (role == CategoryRole) return int(FileType::categorize(name));
     if (role == ProgressRole)
         return r.total > 0 ? int(100 * r.received / r.total) : 0;
+    // Torrent's hash-verify phase (Checking) is "active" like Downloading but
+    // has no throughput of its own - flag it with the same orange identity
+    // color the progress grid already uses for Active/Downloading cells
+    // (Theme.cpp's GridColors::active, #f7941e) so the table stays visually
+    // consistent with the grid once Task 6's Torrent Kind lands.
+    if (role == Qt::ForegroundRole && ix.column() == Status &&
+        r.task->state() == DownloadState::Checking)
+        return QColor("#f7941e");
 
     if (role != Qt::DisplayRole) return {};
     switch (ix.column()) {

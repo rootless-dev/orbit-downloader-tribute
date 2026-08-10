@@ -32,6 +32,26 @@ static QTime timeOr(const QString& s, QTime def) {
     const QTime t = QTime::fromString(s, "HH:mm");
     return t.isValid() ? t : def;
 }
+static QString verifyToStr(ResumeVerifyMode v) {
+    switch (v) {
+        case ResumeVerifyMode::RecheckOnOpen: return "recheck";
+        case ResumeVerifyMode::TrustBitfield: default: return "trust";
+    }
+}
+static ResumeVerifyMode verifyFromStr(const QString& s) {
+    if (s == "recheck") return ResumeVerifyMode::RecheckOnOpen;
+    return ResumeVerifyMode::TrustBitfield;
+}
+static QString strategyToStr(PieceStrategy p) {
+    switch (p) {
+        case PieceStrategy::Sequential: return "sequential";
+        case PieceStrategy::RarestFirst: default: return "rarest";
+    }
+}
+static PieceStrategy strategyFromStr(const QString& s) {
+    if (s == "sequential") return PieceStrategy::Sequential;
+    return PieceStrategy::RarestFirst;
+}
 
 namespace SettingsIo {
 
@@ -58,6 +78,16 @@ AppSettings fromJson(const QJsonObject& root, const EngineConfig& defaults) {
     s.browser.enabled = br.value("enabled").toBool(false);
     s.browser.port    = quint16(br.value("port").toInt(8697));
     s.browser.token   = br.value("token").toString();
+
+    const QJsonObject bt = root.value("bittorrent").toObject();
+    s.bittorrent.maxPeersPerTorrent = bt.value("maxPeersPerTorrent").toInt(50);
+    s.bittorrent.verify             = verifyFromStr(bt.value("verify").toString());
+    s.bittorrent.defaultStrategy    = strategyFromStr(bt.value("strategy").toString());
+    s.bittorrent.listenPort         = quint16(bt.value("listenPort").toInt(6881));
+
+    const QJsonObject dht = root.value("dht").toObject();
+    s.dht.enabled = dht.value("enabled").toBool(true);
+    s.dht.port    = quint16(dht.value("port").toInt(6881));
     return s;
 }
 
@@ -81,6 +111,14 @@ QJsonObject toJson(const AppSettings& s, const QJsonObject& prev) {
         {"enabled", s.browser.enabled},
         {"port",    int(s.browser.port)},
         {"token",   s.browser.token}};
+    root["bittorrent"] = QJsonObject{
+        {"maxPeersPerTorrent", s.bittorrent.maxPeersPerTorrent},
+        {"verify",             verifyToStr(s.bittorrent.verify)},
+        {"strategy",           strategyToStr(s.bittorrent.defaultStrategy)},
+        {"listenPort",         int(s.bittorrent.listenPort)}};
+    root["dht"] = QJsonObject{
+        {"enabled", s.dht.enabled},
+        {"port",    int(s.dht.port)}};
     return root;
 }
 

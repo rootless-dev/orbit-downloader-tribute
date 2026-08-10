@@ -52,10 +52,15 @@ Prefer to build it yourself? See [Build, test, and run](#build-test-and-run) bel
 - **Ways to add downloads:** New dialog (paste a URL), clipboard monitor, drag & drop of links
   onto the window, and a **browser extension** (Chrome/Chromium) that **intercepts** downloads and
   hands them to the app (see [Browser integration](#browser-integration)).
+- **BitTorrent (leech-only):** open a `.torrent` via the **File** menu or drag & drop, pick which
+  files to fetch, and download with SHA-1-verified pieces (rarest-first or sequential strategy,
+  selectable per torrent), pause/resume across app restarts, and Force re-check. Accepted MVP
+  limitations: **no magnet links / DHT** (`.torrent` files only), **HTTP trackers only** (no UDP
+  trackers), **leech-only** (no seeding after completion), and **no encryption / uTP**.
 
 ### In progress / upcoming phases
 
-- **P2P/P2SP:** out of scope **for now**, but planned to arrive soon.
+- **BitTorrent beyond the MVP:** magnet links, DHT peer discovery, UDP trackers, and seeding.
 - **Assisted extension install** — today it is loaded manually as "unpacked".
 
 Out of scope (likely permanent): streaming capture.

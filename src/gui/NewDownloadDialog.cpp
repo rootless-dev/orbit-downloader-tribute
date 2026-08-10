@@ -3,6 +3,7 @@
 #include "FileType.h"
 #include "UrlName.h"
 #include "HttpProbe.h"
+#include "torrent/MagnetUri.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QDialogButtonBox>
@@ -19,6 +20,15 @@
 
 bool NewDownloadDialog::isValidDownloadUrl(const QUrl& u) {
     return isDownloadableScheme(u);
+}
+
+bool NewDownloadDialog::isValidMagnetUri(const QString& text) {
+    return MagnetUri::parse(text.trimmed()).isValid();
+}
+
+QString NewDownloadDialog::magnetUri() const {
+    const QString t = m_url->text().trimmed();
+    return isValidMagnetUri(t) ? t : QString();
 }
 
 NewDownloadDialog::NewDownloadDialog(QWidget* parent, const QUrl& prefill) : QDialog(parent) {
@@ -70,7 +80,10 @@ NewDownloadDialog::NewDownloadDialog(QWidget* parent, const QUrl& prefill) : QDi
 
     auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(box, &QDialogButtonBox::accepted, this, [this]{
-        if (isValidDownloadUrl(url())) accept();
+        // Task 16: a pasted magnet: string is also a valid OK, routed by the
+        // caller (MainWindow::addUrlViaDialog) via magnetUri()/destDir()
+        // instead of url()/destPath().
+        if (isValidDownloadUrl(url()) || isValidMagnetUri(m_url->text())) accept();
     });
     connect(box, &QDialogButtonBox::rejected, this, &QDialog::reject);
     form->addRow(box);
@@ -119,3 +132,4 @@ void NewDownloadDialog::applyProbeResult(const QUrl& probedUrl, const ProbeResul
 
 QUrl    NewDownloadDialog::url() const      { return QUrl(m_url->text().trimmed()); }
 QString NewDownloadDialog::destPath() const { return QDir(m_dir->text()).filePath(m_name->text()); }
+QString NewDownloadDialog::destDir() const  { return m_dir->text(); }

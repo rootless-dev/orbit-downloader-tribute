@@ -17,6 +17,7 @@ public:
                const HeaderList& extraHeaders) override;
     void stop() override;
     Segment segment() const override { return m_seg; }
+    bool shrinkEnd(qint64 newEnd) override;
 
 private:
     enum class Step { Mdtm, Pasv, Rest, Retr, Transferring };
