@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/rootless-dev/orbit-downloader-tribute/compare/orbit-downloader-tribute-v0.4.0...orbit-downloader-tribute-v0.5.0) (2026-08-10)
+
+
+### Features
+
+* **download:** split the longest segment when a connection frees up ([d9e0c58](https://github.com/rootless-dev/orbit-downloader-tribute/commit/d9e0c58a2ed0657f550bf80f775dc3f78130cf8c))
+* **torrent:** BitTorrent leech-only download support (Phase 6 Sub-phase A) ([184ca2e](https://github.com/rootless-dev/orbit-downloader-tribute/commit/184ca2edaf2d1fa38b91368c6463a2a3957ca9a5))
+* **torrent:** DHT, magnet links, and metadata exchange (Sub-phase C) ([5ee9de4](https://github.com/rootless-dev/orbit-downloader-tribute/commit/5ee9de45ee523fa3fd8f91f2539145fdc3e20d76))
+* **torrent:** UDP trackers + multi-tracker + compact IPv4/IPv6 peers (Sub-phase B) ([8ac9add](https://github.com/rootless-dev/orbit-downloader-tribute/commit/8ac9addbd80749b81ad6928022b64a4db8076131))
+
+
+### Bug Fixes
+
+* **torrent:** wait for the peer handshake through the event loop ([eb445e9](https://github.com/rootless-dev/orbit-downloader-tribute/commit/eb445e9753ab3bd26a131794deebd75a6a5d97c8))
+
 ## [0.4.0](https://github.com/rootless-dev/orbit-downloader-tribute/compare/orbit-downloader-tribute-v0.3.0...orbit-downloader-tribute-v0.4.0) (2026-07-23)
 
 
